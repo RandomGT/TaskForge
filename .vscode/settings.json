@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.ttml": "xml",
+        "*.ttss": "css"
+    },
+    "chatgpt.openOnStartup": true,
+    "chatgpt.commentCodeLensEnabled": false
+}
