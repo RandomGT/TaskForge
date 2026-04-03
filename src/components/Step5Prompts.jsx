@@ -71,7 +71,7 @@ function formatSkillsBlock(skills) {
    - 描述: ${skill.description || '无描述'}
    - ${tags}
    - ${matched}${skill.npmName ? `
-   - npm 包名（将按勾选尝试安装）: ${skill.npmName}` : `
+   - npm 包名: ${skill.npmName}` : `
    - npm: 无（仅作规范参考）`}`;
   }).join('\n');
 }
@@ -217,8 +217,11 @@ export default function Step5Prompts() {
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [recommendedSkills, setRecommendedSkills] = useState([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
-  /** skillRowId -> 是否参与 Prompt 与 npm 安装（默认全选） */
+  /** skillRowId -> 是否纳入 Prompt（默认全选；npm 安装仅通过「一键安装全部 Skill」） */
   const [skillInstallSelected, setSkillInstallSelected] = useState({});
+  /** skillRowId -> 正在执行一键安装中（逐包） */
+  const [skillRowInstallLoading, setSkillRowInstallLoading] = useState({});
+  const [isBulkInstallingSkills, setIsBulkInstallingSkills] = useState(false);
   const [executionMode, setExecutionMode] = useState('full');
   const [stepRuntimeMap, setStepRuntimeMap] = useState({});
   const [selectedStepIds, setSelectedStepIds] = useState([]);
@@ -345,6 +348,23 @@ export default function Step5Prompts() {
     [recommendedSkills, skillInstallSelected],
   );
 
+  /** 含 npm 的可安装包（去重，顺序与推荐列表首次出现一致） */
+  const installableSkillPackagesPlan = useMemo(() => {
+    const orderedPackages = [];
+    const pkgToRowIds = new Map();
+    recommendedSkills.forEach((skill, index) => {
+      const pkg = (skill.npmName || '').trim();
+      if (!pkg) return;
+      const rowId = skillRowId(skill, index);
+      if (!pkgToRowIds.has(pkg)) {
+        pkgToRowIds.set(pkg, []);
+        orderedPackages.push(pkg);
+      }
+      pkgToRowIds.get(pkg).push(rowId);
+    });
+    return { orderedPackages, pkgToRowIds };
+  }, [recommendedSkills]);
+
   const skillsBlock = useMemo(() => formatSkillsBlock(skillsForPrompt), [skillsForPrompt]);
 
   const promptText = useMemo(() => `你是一个负责落地实现的 AI Agent。
@@ -357,7 +377,7 @@ export default function Step5Prompts() {
 在正式执行前，请充分理解下方「候选 Skills」中每一项的名称与描述；结合三份 md 判断哪些 Skill 与本次任务真正相关，仅对适用项严格遵循其规范（不适用的不要假装已采用）。
 
 Skill 使用方式：
-- 下方为系统根据项目上下文推荐的候选集；用户可通过勾选决定是否为含 npm 包名的项执行安装。
+- 下方为系统根据项目上下文推荐的候选集；勾选仅决定某项是否写入本轮 Prompt，npm 包需在执行前通过「一键安装全部 Skill」单独安装。
 - 你必须根据各 Skill 的名称与描述自行筛选适用子集，并优先查阅已安装包内的说明（如 SKILL.md）以吸收具体约定。
 - 对判定为不适用的 Skill，不要在输出中引用或声称已遵循。
 
@@ -422,6 +442,82 @@ ${skillsBlock}
     copyToClipboard(promptText);
   };
 
+  const runSingleSkillPackageInstall = useCallback((projectPath, pkg) => (
+    new Promise((resolve, reject) => {
+      installSkillPackages(projectPath, [pkg], {
+        onStatus: (msg) => setTerminalStatus(msg),
+        onChunk: (text) => appendTerminal(text),
+        onDone: () => resolve({ ok: true }),
+        onAborted: () => resolve({ ok: false, aborted: true }),
+        onError: (msg, stderr) => {
+          reject(new Error(stderr ? `${msg}\n${stderr}` : msg));
+        },
+      });
+    })
+  ), [appendTerminal]);
+
+  const handleInstallAllSkills = useCallback(async () => {
+    const { orderedPackages, pkgToRowIds } = installableSkillPackagesPlan;
+    if (!state.projectPath) {
+      showToast('⚠️ 请先在第一步配置项目路径');
+      return;
+    }
+    if (orderedPackages.length === 0) {
+      showToast('⚠️ 当前推荐中没有可安装的 npm Skill 包');
+      return;
+    }
+
+    const projectRootDisplay = state.projectPath.trim().replace(/\/+$/, '') || state.projectPath;
+
+    setIsBulkInstallingSkills(true);
+    setTerminalVisible(true);
+    setTerminalOutput((prev) => {
+      const head = `[taskforge] ===== 一键安装全部 Skill（${orderedPackages.length} 个包）=====\n`
+        + `[taskforge] 项目根目录 = 第一步「项目路径」: ${projectRootDisplay}\n`
+        + `[taskforge] 写入目录: ${projectRootDisplay}/.cursor/skills/<包名>/\n`;
+      return prev.trim() ? `${prev}\n\n${head}` : head;
+    });
+    setTerminalStatus('准备安装 Skills...');
+
+    try {
+      for (const pkg of orderedPackages) {
+        const rowIds = pkgToRowIds.get(pkg) || [];
+        setSkillRowInstallLoading((prev) => {
+          const next = { ...prev };
+          rowIds.forEach((id) => { next[id] = true; });
+          return next;
+        });
+
+        appendTerminal(`\n[taskforge] ----------\n[taskforge] 正在安装: ${pkg}（完成后写入 ${projectRootDisplay}/.cursor/skills/）\n`);
+
+        await runSingleSkillPackageInstall(state.projectPath, pkg);
+
+        setSkillRowInstallLoading((prev) => {
+          const next = { ...prev };
+          rowIds.forEach((id) => { delete next[id]; });
+          return next;
+        });
+      }
+
+      appendTerminal('\n[taskforge] ===== 全部 Skill 安装流程结束 =====\n');
+      setTerminalStatus('Skill 安装完成');
+      showToast('✅ 全部 Skill 已安装');
+    } catch (error) {
+      appendTerminal(`\n[taskforge] 安装中断: ${error.message}\n`);
+      setTerminalStatus('Skill 安装失败');
+      showToast(error.message || '❌ Skill 安装失败');
+    } finally {
+      setSkillRowInstallLoading({});
+      setIsBulkInstallingSkills(false);
+    }
+  }, [
+    appendTerminal,
+    installableSkillPackagesPlan,
+    runSingleSkillPackageInstall,
+    showToast,
+    state.projectPath,
+  ]);
+
   const updateStepRuntime = useCallback((stepId, updater) => {
     setStepRuntimeMap((prev) => {
       const current = prev[stepId] || createStepRuntime();
@@ -478,45 +574,12 @@ ${skillsBlock}
       appendTerminal(`[taskforge] - ${file.filename}\n`);
     });
 
-    const packagesToInstall = [...new Set(
-      skillsForPrompt
-        .map((s) => (s.npmName || '').trim())
-        .filter(Boolean),
-    )];
-
-    if (packagesToInstall.length > 0) {
-      setTerminalStatus(`正在安装 ${packagesToInstall.length} 个 npm Skill 包...`);
-      appendTerminal('[taskforge] 即将执行 npm install（流式输出如下）...\n');
-    } else {
-      setTerminalStatus('无可安装 npm 包，准备启动 CLI');
-      appendTerminal('[taskforge] 当前勾选项无 npm 包名，跳过安装\n');
-    }
-
-    const installResult = await new Promise((resolve, reject) => {
-      if (packagesToInstall.length === 0) {
-        resolve({ aborted: false });
-        return;
-      }
-      const cancelInstall = installSkillPackages(state.projectPath, packagesToInstall, {
-        onStatus: (msg) => setTerminalStatus(msg),
-        onChunk: (text) => appendTerminal(text),
-        onDone: () => resolve({ aborted: false }),
-        onAborted: () => resolve({ aborted: true }),
-        onError: (msg, stderr) => {
-          reject(new Error(stderr ? `${msg}\n${stderr}` : msg));
-        },
-      });
-      abortRef.current = cancelInstall;
-    });
-
-    abortRef.current = null;
-
-    if (installResult.aborted || stopRequestedRef.current) {
+    if (stopRequestedRef.current) {
       return { aborted: true };
     }
 
     if (skillsForPrompt.length > 0) {
-      appendTerminal('[taskforge] 已纳入本轮 Prompt 的 Skills:\n');
+      appendTerminal('[taskforge] 已纳入本轮 Prompt 的 Skills（npm 不在此步骤安装，请按需使用「一键安装全部 Skill」）:\n');
       skillsForPrompt.forEach((skill) => {
         appendTerminal(`- ${skill.name}${skill.npmName ? ` → ${skill.npmName}` : ''}\n`);
       });
@@ -875,6 +938,12 @@ ${skillsBlock}
 
   const canExecute = Boolean(selectedEngine) && !isExecuting;
   const canOpenStepwise = !skillsLoading && !isExecuting && !isNormalizingSteps;
+  const canInstallAllSkills = Boolean(state.projectPath)
+    && installableSkillPackagesPlan.orderedPackages.length > 0
+    && !skillsLoading
+    && !isBulkInstallingSkills
+    && !isExecuting
+    && !isNormalizingSteps;
 
   return (
     <div className="step-content active fade-in">
@@ -895,6 +964,7 @@ ${skillsBlock}
           <div className="ai-log-body" style={{ whiteSpace: 'normal' }}>
             {recommendedSkills.length > 0 ? recommendedSkills.map((skill, index) => {
               const rowId = skillRowId(skill, index);
+              const rowLoading = Boolean(skillRowInstallLoading[rowId]);
               return (
                 <label
                   key={rowId}
@@ -903,12 +973,17 @@ ${skillsBlock}
                     gap: 10,
                     marginBottom: 12,
                     alignItems: 'flex-start',
-                    cursor: 'pointer',
+                    cursor: rowLoading ? 'wait' : 'pointer',
+                    opacity: rowLoading ? 0.88 : 1,
                   }}
                 >
+                  {rowLoading ? (
+                    <span className="ai-spinner" style={{ marginTop: 4, flexShrink: 0 }} aria-hidden />
+                  ) : null}
                   <input
                     type="checkbox"
                     checked={skillInstallSelected[rowId] !== false}
+                    disabled={rowLoading}
                     onChange={(e) => {
                       setSkillInstallSelected((prev) => ({
                         ...prev,
@@ -919,6 +994,9 @@ ${skillsBlock}
                   />
                   <span style={{ flex: 1 }}>
                     <strong>{skill.name}</strong>
+                    {rowLoading ? (
+                      <span style={{ marginLeft: 8, fontSize: '0.85em', opacity: 0.9 }}>安装中…</span>
+                    ) : null}
                     {skill.npmName ? (
                       <span style={{ marginLeft: 8, fontSize: '0.9em', opacity: 0.85 }}>
                         npm: {skill.npmName}
@@ -934,6 +1012,41 @@ ${skillsBlock}
               );
             }) : '当前未命中推荐 Skill，将按默认 Prompt 执行。'}
           </div>
+          {recommendedSkills.length > 0 && (
+            <div
+              style={{
+                padding: '12px 0 4px',
+                borderTop: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}
+            >
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleInstallAllSkills}
+                disabled={!canInstallAllSkills}
+                style={{ opacity: canInstallAllSkills ? 1 : 0.55 }}
+              >
+                {isBulkInstallingSkills ? '⏳ 正在安装…' : '📦 一键安装全部 Skill'}
+              </button>
+              {installableSkillPackagesPlan.orderedPackages.length === 0 && !skillsLoading ? (
+                <span style={{ fontSize: '0.9em', opacity: 0.75 }}>
+                  当前列表无 npm 包名，无需安装
+                </span>
+              ) : installableSkillPackagesPlan.orderedPackages.length > 0 ? (
+                <span style={{ fontSize: '0.9em', opacity: 0.75 }}>
+                  安装到第一步「项目路径」下的
+                  <code style={{ fontSize: '0.92em' }}>.cursor/skills/</code>
+                  {state.projectPath.trim() ? (
+                    <>（当前为 <code style={{ fontSize: '0.88em', wordBreak: 'break-all' }}>{state.projectPath.trim().replace(/\/+$/, '')}/.cursor/skills/</code>）</>
+                  ) : null}
+                </span>
+              ) : null}
+            </div>
+          )}
         </div>
 
         <textarea
@@ -1002,7 +1115,7 @@ ${skillsBlock}
                   ) : (
                     <span key={i}>{piece.value}</span>
                   ))}
-                {isExecuting && <span className="terminal-cursor">▋</span>}
+                {(isExecuting || isBulkInstallingSkills) && <span className="terminal-cursor">▋</span>}
               </pre>
             </div>
 

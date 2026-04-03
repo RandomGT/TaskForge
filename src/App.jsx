@@ -30,15 +30,23 @@ function AppInner() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [state]);
 
-  const renderStep = () => {
-    switch (state.currentStep) {
-      case 1: return <Step1Requirement />;
-      case 2: return <Step2Resources />;
-      case 3: return <Step3TaskSplit />;
-      case 4: return <Step5Prompts />;
-      default: return <Step1Requirement />;
-    }
-  };
+  /** 同时挂载各步内容，避免切换 Step 时卸载导致本地状态（如 Step5 执行过程）丢失 */
+  const stepPanels = (
+    <>
+      <div className="step-panel" hidden={state.currentStep !== 1}>
+        <Step1Requirement />
+      </div>
+      <div className="step-panel" hidden={state.currentStep !== 2}>
+        <Step2Resources />
+      </div>
+      <div className="step-panel" hidden={state.currentStep !== 3}>
+        <Step3TaskSplit />
+      </div>
+      <div className="step-panel" hidden={state.currentStep !== 4}>
+        <Step5Prompts />
+      </div>
+    </>
+  );
 
   return (
     <>
@@ -51,7 +59,7 @@ function AppInner() {
             </div>
             <div className="panel-body">
               <StepIndicator />
-              {renderStep()}
+              {stepPanels}
             </div>
           </div>
         </div>

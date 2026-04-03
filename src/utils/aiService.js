@@ -142,7 +142,7 @@ export async function getRecommendedSkills(payload) {
 }
 
 /**
- * 在项目目录流式执行 npm install（SSE），用于安装 Skill 对应的 npm 包
+ * 将 Skill 对应 npm 包拉取到临时目录后，写入 projectPath/.cursor/skills/（projectPath 与第一步表单一致）（SSE）
  */
 export function installSkillPackages(projectPath, packages, callbacks) {
   const controller = new AbortController();
@@ -598,10 +598,16 @@ export function aiExecuteTask(params, callbacks) {
         callbacks.onDone?.('');
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        console.error('[aiService] Stream read error:', err);
-        callbacks.onError?.(`SSE 读取错误: ${err.message}`);
+      if (err.name === 'AbortError') {
+        // 用户点击停止时会 abort fetch；须回调 onDone，否则 runTaskWithCli 的 Promise 永不 resolve
+        console.log('[aiService] Execute stream read aborted by user');
+        if (!receivedDone) {
+          callbacks.onDone?.('');
+        }
+        return;
       }
+      console.error('[aiService] Stream read error:', err);
+      callbacks.onError?.(`SSE 读取错误: ${err.message}`);
     }
   })();
 

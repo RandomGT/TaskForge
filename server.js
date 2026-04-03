@@ -1,7 +1,17 @@
 import express from 'express';
 import cors from 'cors';
 import { spawn, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { formatFigmaPagesForSplitPrompt } from './src/utils/figmaPages.js';
@@ -1020,6 +1030,91 @@ function sanitizeNpmPackageList(raw) {
   return out;
 }
 
+/** npm --prefix 下 node_modules 中某个包的绝对路径 */
+function nodeModulesPackageDir(installPrefix, packageName) {
+  const nm = path.join(installPrefix, 'node_modules');
+  if (packageName.startsWith('@')) {
+    const i = packageName.indexOf('/');
+    const scope = packageName.slice(0, i);
+    const name = packageName.slice(i + 1);
+    return path.join(nm, scope, name);
+  }
+  return path.join(nm, packageName);
+}
+
+/** Cursor 项目级目录名，如 @xdf-skills/foo -> xdf-skills-foo */
+function cursorSkillDirName(packageName) {
+  return packageName.replace(/^@/, '').replace(/\//g, '-');
+}
+
+/**
+ * 同步到 .cursor/skills 时的复制规则：
+ * - 排除包内 node_modules（相对路径段，不误伤 .../node_modules/pkg/ 外层）
+ * - 排除 npm 的 bin 目录（仅顶层 bin/，不误伤其他目录名中含 bin 的路径）
+ * - 排除所有 package.json
+ */
+function shouldCopySkillAsset(src, skillContentDir) {
+  const rel = path.relative(skillContentDir, src);
+  if (!rel || rel === '.') return true;
+  const parts = path.normalize(rel).split(path.sep).filter(Boolean);
+  if (parts.includes('node_modules')) return false;
+  if (parts[0] === 'bin') return false;
+  if (parts[parts.length - 1] === 'package.json') return false;
+  return true;
+}
+
+/**
+ * 在 npm 包目录下定位含 SKILL.md 的目录（支持子目录）
+ */
+function resolveSkillContentDir(packageRootDir, maxDepth = 6) {
+  function walk(dir, depth) {
+    if (depth > maxDepth) return null;
+    if (existsSync(path.join(dir, 'SKILL.md'))) return dir;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      if (ent.name === 'node_modules') continue;
+      const hit = walk(path.join(dir, ent.name), depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  return walk(path.resolve(packageRootDir), 0);
+}
+
+/**
+ * 将 npm 包内文件复制到 projectRoot/.cursor/skills/<name>/（Cursor 项目级 Skills）
+ * projectRoot 与 Taskforge 第一步「项目路径」一致
+ */
+function syncPackageIntoProjectCursorSkills(projectRoot, packageName, packageRootDir, sendSSE) {
+  const skillContentDir = resolveSkillContentDir(packageRootDir);
+  if (!skillContentDir) {
+    sendSSE('chunk', {
+      text: `[taskforge] 警告: 包 ${packageName} 内未找到 SKILL.md，已跳过写入 .cursor/skills\n`,
+    });
+    return false;
+  }
+  const destDirName = cursorSkillDirName(packageName);
+  const dest = path.join(projectRoot, '.cursor', 'skills', destDirName);
+  mkdirSync(path.join(projectRoot, '.cursor', 'skills'), { recursive: true });
+  if (existsSync(dest)) {
+    rmSync(dest, { recursive: true, force: true });
+  }
+  cpSync(skillContentDir, dest, {
+    recursive: true,
+    filter: (src) => shouldCopySkillAsset(src, skillContentDir),
+  });
+  sendSSE('chunk', {
+    text: `[taskforge] 已写入: ${dest}/\n`,
+  });
+  return true;
+}
+
 app.post('/api/install-skills', (req, res) => {
   const { projectPath, packages: rawPackages } = req.body || {};
 
@@ -1033,8 +1128,16 @@ app.post('/api/install-skills', (req, res) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  if (!projectPath || !existsSync(projectPath)) {
-    sendSSE('error', { message: '无效的项目路径或目录不存在' });
+  if (!projectPath || typeof projectPath !== 'string' || !projectPath.trim()) {
+    sendSSE('error', { message: '无效的项目路径（请填写第一步「项目路径」）' });
+    res.end();
+    return;
+  }
+
+  /** 与 Step1 `projectPath` 输入一致，解析为绝对路径后作为 `.cursor/skills` 的根 */
+  const projectRoot = path.resolve(projectPath.trim());
+  if (!existsSync(projectRoot)) {
+    sendSSE('error', { message: '项目路径对应目录不存在，请检查第一步填写是否正确' });
     res.end();
     return;
   }
@@ -1048,12 +1151,45 @@ app.post('/api/install-skills', (req, res) => {
     return;
   }
 
-  sendSSE('status', { message: `正在安装 ${packages.length} 个 npm 包...` });
-  sendSSE('chunk', { text: `[taskforge] 在项目目录执行: npm install ${packages.join(' ')}\n\n` });
+  let tmpRoot;
+  try {
+    tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'taskforge-skills-'));
+  } catch (err) {
+    sendSSE('error', { message: err.message || '无法创建临时目录' });
+    res.end();
+    return;
+  }
+  const installPrefix = path.join(tmpRoot, 'prefix');
+  mkdirSync(installPrefix, { recursive: true });
+
+  const npmInstallArgs = [
+    ...packages,
+    '--prefix',
+    installPrefix,
+    '--no-fund',
+    '--no-audit',
+    '--legacy-peer-deps',
+  ];
+
+  sendSSE('status', { message: `正在安装 ${packages.length} 个 npm Skill 包...` });
+  const skillsRootDir = path.join(projectRoot, '.cursor', 'skills');
+  sendSSE('chunk', {
+    text: `[taskforge] 项目根目录（第一步「项目路径」）: ${projectRoot}\n`
+      + `[taskforge] Skills 将写入: ${skillsRootDir}/\n`
+      + `[taskforge] npm 仅在临时目录执行，不会修改该项目的 package.json\n`
+      + `[taskforge] npm install ${npmInstallArgs.join(' ')}\n\n`,
+  });
 
   let finished = false;
-  const proc = spawn('npm', ['install', ...packages, '--no-fund', '--no-audit'], {
-    cwd: projectPath,
+  const cleanupTmp = () => {
+    try {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const proc = spawn('npm', ['install', ...npmInstallArgs], {
     shell: false,
     env: { ...process.env, FORCE_COLOR: '0' },
   });
@@ -1070,21 +1206,39 @@ app.post('/api/install-skills', (req, res) => {
     if (finished) return;
     finished = true;
     if (code !== 0) {
+      cleanupTmp();
       sendSSE('error', {
         message: `npm install 退出码: ${code}`,
         stderr: '请查看上方 npm 输出',
       });
-    } else {
-      sendSSE('status', { message: 'npm 安装完成' });
-      sendSSE('chunk', { text: '\n[taskforge] npm install 已完成\n' });
-      sendSSE('done', { output: '' });
+      res.end();
+      return;
     }
-    res.end();
+    try {
+      mkdirSync(skillsRootDir, { recursive: true });
+      for (const pkg of packages) {
+        const pkgDir = nodeModulesPackageDir(installPrefix, pkg);
+        if (!existsSync(pkgDir)) {
+          sendSSE('chunk', { text: `[taskforge] 警告: 临时安装目录中未找到 ${pkg}\n` });
+          continue;
+        }
+        syncPackageIntoProjectCursorSkills(projectRoot, pkg, pkgDir, sendSSE);
+      }
+      sendSSE('status', { message: 'Skill 已写入 .cursor/skills' });
+      sendSSE('chunk', { text: '\n[taskforge] npm 拉取与 .cursor/skills 同步完成\n' });
+      sendSSE('done', { output: '' });
+    } catch (err) {
+      sendSSE('error', { message: err.message || '同步到 .cursor/skills 失败' });
+    } finally {
+      cleanupTmp();
+      res.end();
+    }
   });
 
   proc.on('error', (err) => {
     if (finished) return;
     finished = true;
+    cleanupTmp();
     sendSSE('error', { message: err.message || '无法启动 npm' });
     res.end();
   });
@@ -1093,6 +1247,7 @@ app.post('/api/install-skills', (req, res) => {
     if (!finished) {
       finished = true;
       proc.kill('SIGTERM');
+      cleanupTmp();
     }
   });
 });
@@ -1516,6 +1671,7 @@ app.post('/api/execute', (req, res) => {
   const startedAt = Date.now();
   let lastOutputAt = Date.now();
   let finished = false;
+  let timeoutHandle = null;
   const cursorState = cli.mode === 'cursor-stream-json' ? createCursorStreamState(sendSSE) : null;
   const heartbeat = setInterval(() => {
     if (finished) return;
@@ -1560,9 +1716,15 @@ app.post('/api/execute', (req, res) => {
   );
 
   res.on('close', () => {
-    if (!finished) {
-      clearInterval(heartbeat);
-      proc.kill();
+    if (finished) return;
+    // 客户端中止 fetch 时先标记结束，避免子进程退出时仍向已关闭的 res 写 SSE
+    finished = true;
+    clearInterval(heartbeat);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    try {
+      proc.kill('SIGTERM');
+    } catch (_) {
+      /* ignore */
     }
   });
 });
