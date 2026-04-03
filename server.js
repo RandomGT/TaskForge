@@ -911,11 +911,235 @@ ${projectContext ? `## 项目上下文\n${projectContext}` : ''}
 - 如果需要新建文件，请放在合理的目录位置`;
 }
 
+// ---------- git helpers（执行分支 UI，复用上方 runGitSync） ----------
+
+function assertSafeGitRefName(name, label = '分支') {
+  const s = String(name || '').trim();
+  if (!s) {
+    throw new Error(`${label}名称不能为空`);
+  }
+  if (s.length > 240 || /[\r\n\0]/.test(s) || s.startsWith('-')) {
+    throw new Error(`${label}名称不合法`);
+  }
+  if (/[`|;$]/.test(s)) {
+    throw new Error(`${label}名称包含非法字符`);
+  }
+  return s;
+}
+
+function collectGitBranches(projectPath) {
+  const inside = runGitSync(projectPath, ['rev-parse', '--is-inside-work-tree'], { allowFailure: true });
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') {
+    return {
+      ok: false,
+      error: '所选路径不是 Git 仓库（未检测到 .git）',
+      current: '',
+      branches: [],
+    };
+  }
+
+  const head = runGitSync(projectPath, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true });
+  const current = head.status === 0 ? head.stdout.trim() : '';
+
+  const br = runGitSync(projectPath, ['branch', '-a', '--no-color'], { allowFailure: true });
+  if (br.status !== 0) {
+    return {
+      ok: false,
+      error: br.stderr.trim() || br.stdout.trim() || 'git branch -a 执行失败',
+      current,
+      branches: [],
+    };
+  }
+
+  const branches = [];
+  const seen = new Set();
+  for (const line of br.stdout.split('\n')) {
+    const raw = line.trim();
+    if (!raw || raw.includes(' -> ')) continue;
+    const name = raw.replace(/^\*\s+/, '').trim();
+    if (!name || name.startsWith('(')) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    branches.push({ name });
+  }
+
+  return {
+    ok: true,
+    current,
+    branches,
+  };
+}
+
+function gitResolveToSha(projectPath, ref) {
+  const r = runGitSync(projectPath, ['rev-parse', `${ref}^{commit}`], { allowFailure: true });
+  if (r.status !== 0) return null;
+  return r.stdout.trim();
+}
+
+function gitHeadSha(projectPath) {
+  return gitResolveToSha(projectPath, 'HEAD');
+}
+
+function gitSameCommit(projectPath, ref) {
+  const h = gitHeadSha(projectPath);
+  const t = gitResolveToSha(projectPath, ref);
+  return Boolean(h && t && h === t);
+}
+
+function appendGitStepLog(logs, step, code, stdout, stderr) {
+  logs.push({
+    step,
+    code: code ?? 0,
+    stdout: stdout || '',
+    stderr: stderr || '',
+  });
+}
+
+function gitEnsureBranch(projectPath, checkoutTargetRaw, newBranchNameRaw) {
+  const logs = [];
+  const checkoutTarget = assertSafeGitRefName(checkoutTargetRaw, '目标');
+  const safeNew = String(newBranchNameRaw || '').trim();
+
+  if (!existsSync(projectPath)) {
+    return { ok: false, error: '项目路径不存在', logs, current: '' };
+  }
+
+  const inside = runGitSync(projectPath, ['rev-parse', '--is-inside-work-tree'], { allowFailure: true });
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') {
+    return { ok: false, error: '所选路径不是 Git 仓库', logs, current: '' };
+  }
+
+  const runCheckoutArgs = (args, description) => {
+    const r = runGitSync(projectPath, args, { allowFailure: true, timeout: 120000 });
+    appendGitStepLog(logs, description, r.status, String(r.stdout || '').trim(), String(r.stderr || '').trim());
+    return r.status === 0;
+  };
+
+  if (safeNew) {
+    const newName = assertSafeGitRefName(safeNew, '新分支');
+    if (!gitSameCommit(projectPath, checkoutTarget)) {
+      if (!runCheckoutArgs(['checkout', checkoutTarget], `git checkout ${checkoutTarget}`)) {
+        const last = logs[logs.length - 1];
+        return {
+          ok: false,
+          error: last?.stderr || last?.stdout || `切换到基础分支 ${checkoutTarget} 失败`,
+          logs,
+          current: '',
+        };
+      }
+    } else {
+      appendGitStepLog(
+        logs,
+        `当前已位于 ${checkoutTarget}（同一提交），跳过 git checkout`,
+        0,
+        '',
+        '',
+      );
+    }
+
+    const existsLocal = runGitSync(projectPath, ['rev-parse', '--verify', `refs/heads/${newName}`], { allowFailure: true });
+    if (existsLocal.status === 0) {
+      return {
+        ok: false,
+        error: `本地分支 ${newName} 已存在，请换用其他名称或先删除该分支`,
+        logs,
+        current: '',
+      };
+    }
+
+    if (!runCheckoutArgs(['checkout', '-b', newName], `git checkout -b ${newName}`)) {
+      const last = logs[logs.length - 1];
+      return {
+        ok: false,
+        error: last?.stderr || last?.stdout || `新建分支 ${newName} 失败`,
+        logs,
+        current: '',
+      };
+    }
+  } else if (gitSameCommit(projectPath, checkoutTarget)) {
+    appendGitStepLog(
+      logs,
+      `当前已在目标分支/提交（${checkoutTarget}），无需切换`,
+      0,
+      '',
+      '',
+    );
+  } else if (!runCheckoutArgs(['checkout', checkoutTarget], `git checkout ${checkoutTarget}`)) {
+    const last = logs[logs.length - 1];
+    return {
+      ok: false,
+      error: last?.stderr || last?.stdout || `切换到 ${checkoutTarget} 失败`,
+      logs,
+      current: '',
+    };
+  }
+
+  const headRef = runGitSync(projectPath, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true });
+  const finalCurrent = headRef.status === 0 ? headRef.stdout.trim() : '';
+  return { ok: true, logs, current: finalCurrent };
+}
+
 // ---------- API routes ----------
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
+});
+
+app.post('/api/git/branches', (req, res) => {
+  const { projectPath } = req.body || {};
+  if (!projectPath || typeof projectPath !== 'string' || !projectPath.trim()) {
+    return res.status(400).json({
+      ok: false,
+      error: '缺少 projectPath',
+      current: '',
+      branches: [],
+    });
+  }
+  const trimmed = projectPath.trim();
+  if (!existsSync(trimmed)) {
+    return res.status(400).json({
+      ok: false,
+      error: '项目路径不存在',
+      current: '',
+      branches: [],
+    });
+  }
+  try {
+    const result = collectGitBranches(trimmed);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message || '读取分支失败',
+      current: '',
+      branches: [],
+    });
+  }
+});
+
+app.post('/api/git/ensure-branch', (req, res) => {
+  const { projectPath, checkoutTarget, newBranchName } = req.body || {};
+  if (!projectPath || typeof projectPath !== 'string' || !projectPath.trim()) {
+    return res.status(400).json({ ok: false, error: '缺少 projectPath', logs: [] });
+  }
+  const trimmed = projectPath.trim();
+  if (!existsSync(trimmed)) {
+    return res.status(400).json({ ok: false, error: '项目路径不存在', logs: [] });
+  }
+  if (!checkoutTarget || typeof checkoutTarget !== 'string') {
+    return res.status(400).json({ ok: false, error: '缺少 checkoutTarget', logs: [] });
+  }
+  try {
+    const result = gitEnsureBranch(trimmed, checkoutTarget, newBranchName);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message || '分支切换失败',
+      logs: [],
+    });
+  }
 });
 
 app.post('/api/prompt-resources', (req, res) => {

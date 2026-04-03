@@ -4,6 +4,8 @@ import { parseTaskOrchestrationDraft } from '../domains/pipeline/draftParsers';
 import {
   aiExecuteTask,
   createStepCheckpoint,
+  ensureGitBranch,
+  fetchGitBranches,
   getRecommendedSkills,
   installSkillPackages,
   normalizeTaskOrchestration,
@@ -51,6 +53,19 @@ function splitTerminalMcpMarkers(text) {
     pieces.push({ kind: 'text', value: s.slice(last) });
   }
   return pieces.length ? pieces : [{ kind: 'text', value: s }];
+}
+
+function formatGitBranchLogEntry(entry) {
+  const step = entry.step || 'git';
+  if (!entry.stderr && !entry.stdout && (entry.code == null || entry.code === 0)) {
+    return `[taskforge] ${step}\n`;
+  }
+  let out = `[taskforge] ${step}`;
+  if (entry.code != null && entry.code !== 0) out += ` （退出码 ${entry.code}）`;
+  out += '\n';
+  if (entry.stdout) out += entry.stdout + (/\n$/.test(entry.stdout) ? '' : '\n');
+  if (entry.stderr) out += entry.stderr + (/\n$/.test(entry.stderr) ? '' : '\n');
+  return out;
 }
 
 function skillRowId(skill, index) {
@@ -227,6 +242,14 @@ export default function Step5Prompts() {
   const [selectedStepIds, setSelectedStepIds] = useState([]);
   const [normalizedSteps, setNormalizedSteps] = useState([]);
   const [isNormalizingSteps, setIsNormalizingSteps] = useState(false);
+  /** 执行分支：来自 git branch -a */
+  const [execBranchList, setExecBranchList] = useState([]);
+  const [execBranchCurrent, setExecBranchCurrent] = useState('');
+  const [selectedExecBranch, setSelectedExecBranch] = useState('');
+  const [createBranchModalOpen, setCreateBranchModalOpen] = useState(false);
+  const [createBranchDraft, setCreateBranchDraft] = useState('');
+  const [createBranchBusy, setCreateBranchBusy] = useState(false);
+  const [gitBranchState, setGitBranchState] = useState({ ok: true, loading: false, error: '' });
   const abortRef = useRef(null);
   const stopRequestedRef = useRef(false);
   const currentStepIdRef = useRef('');
@@ -267,11 +290,85 @@ export default function Step5Prompts() {
     return map;
   }, [orchestrationSteps]);
 
+  const mergeBranchesResponse = useCallback((data, preserveSelected) => {
+    const branches = data.branches || [];
+    setExecBranchList(branches);
+    setExecBranchCurrent(data.current || '');
+    if (!preserveSelected) {
+      setSelectedExecBranch((prev) => {
+        const names = branches.map((b) => b.name);
+        if (prev && names.includes(prev)) return prev;
+        if (data.current && names.includes(data.current)) return data.current;
+        return names[0] || '';
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (terminalBodyRef.current) {
       terminalBodyRef.current.scrollTop = terminalBodyRef.current.scrollHeight;
     }
   }, [terminalOutput, terminalStatus, terminalPieces]);
+
+  useEffect(() => {
+    const projectPath = state.projectPath?.trim();
+    if (!projectPath) {
+      setExecBranchList([]);
+      setSelectedExecBranch('');
+      setExecBranchCurrent('');
+      setGitBranchState({ ok: true, loading: false, error: '' });
+      return undefined;
+    }
+
+    let cancelled = false;
+    setGitBranchState({ ok: false, loading: true, error: '' });
+    (async () => {
+      try {
+        const data = await fetchGitBranches(projectPath);
+        if (cancelled) return;
+        if (!data.ok) {
+          setExecBranchList([]);
+          setSelectedExecBranch('');
+          setExecBranchCurrent('');
+          setGitBranchState({
+            ok: false,
+            loading: false,
+            error: data.error || '读取分支失败',
+          });
+          return;
+        }
+        mergeBranchesResponse(data, false);
+        setGitBranchState({ ok: true, loading: false, error: '' });
+      } catch (e) {
+        if (!cancelled) {
+          setExecBranchList([]);
+          setSelectedExecBranch('');
+          setExecBranchCurrent('');
+          setGitBranchState({
+            ok: false,
+            loading: false,
+            error: e.message || '网络错误',
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mergeBranchesResponse, state.projectPath]);
+
+  useEffect(() => {
+    if (!createBranchModalOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape' && !createBranchBusy) {
+        e.preventDefault();
+        setCreateBranchModalOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [createBranchBusy, createBranchModalOpen]);
 
   useEffect(() => {
     setStepRuntimeMap((prev) => {
@@ -425,6 +522,128 @@ ${skillsBlock}
     if (!text) return;
     setTerminalOutput((prev) => prev + text);
   }, []);
+
+  const syncExecutionBranch = useCallback(async () => {
+    const projectPath = state.projectPath?.trim();
+    if (!projectPath) return { ok: true };
+
+    appendTerminal('\n[taskforge] ===== Git 执行分支 =====\n');
+    try {
+      const target = selectedExecBranch.trim();
+      if (!target) {
+        appendTerminal('[taskforge] ❌ 未选择目标分支\n');
+        showToast('⚠️ 请选择执行分支');
+        return { ok: false };
+      }
+      const data = await ensureGitBranch(projectPath, target, '');
+      for (const log of data.logs || []) {
+        appendTerminal(formatGitBranchLogEntry(log));
+      }
+      if (!data.ok) {
+        appendTerminal(`[taskforge] ❌ ${data.error || '分支准备失败'}\n`);
+        showToast(data.error || '分支准备失败');
+        return { ok: false };
+      }
+      appendTerminal(`[taskforge] ✅ 当前分支: ${data.current || '（未知）'}\n`);
+      return { ok: true };
+    } catch (e) {
+      appendTerminal(`[taskforge] ❌ ${e.message}\n`);
+      showToast(e.message);
+      return { ok: false };
+    }
+  }, [appendTerminal, selectedExecBranch, showToast, state.projectPath]);
+
+  const openCreateBranchModal = useCallback(() => {
+    setCreateBranchDraft('');
+    setCreateBranchModalOpen(true);
+  }, []);
+
+  const closeCreateBranchModal = useCallback(() => {
+    if (createBranchBusy) return;
+    setCreateBranchModalOpen(false);
+  }, [createBranchBusy]);
+
+  const confirmCreateBranch = useCallback(async () => {
+    const projectPath = state.projectPath?.trim();
+    const base = selectedExecBranch.trim();
+    const name = createBranchDraft.trim();
+    if (!projectPath || !gitBranchState.ok) return;
+    if (!base) {
+      showToast('⚠️ 请先在「目标分支」中选择作为起点的分支');
+      return;
+    }
+    if (!name) {
+      showToast('⚠️ 请输入新分支名称');
+      return;
+    }
+    setCreateBranchBusy(true);
+    setTerminalVisible(true);
+    appendTerminal(`\n[taskforge] ===== 新建本地分支（git checkout -b）=====\n`);
+    appendTerminal(`[taskforge] 基础分支（先 git checkout）: ${base}\n`);
+    try {
+      const data = await ensureGitBranch(projectPath, base, name);
+      for (const log of data.logs || []) {
+        appendTerminal(formatGitBranchLogEntry(log));
+      }
+      if (!data.ok) {
+        appendTerminal(`[taskforge] ❌ ${data.error || '创建失败'}\n`);
+        showToast(data.error || '创建失败');
+        return;
+      }
+      appendTerminal(`[taskforge] ✅ 当前已位于: ${data.current || name}\n`);
+      appendTerminal('[taskforge] 若要以该分支作为执行目标，请在「目标分支」下拉里手动切换后，再执行「立即执行」或「分步执行」。\n');
+      showToast('✅ 新分支已创建');
+      setCreateBranchModalOpen(false);
+      const fresh = await fetchGitBranches(projectPath);
+      if (fresh.ok) {
+        mergeBranchesResponse(fresh, true);
+      }
+    } catch (e) {
+      appendTerminal(`[taskforge] ❌ ${e.message}\n`);
+      showToast(e.message);
+    } finally {
+      setCreateBranchBusy(false);
+    }
+  }, [
+    appendTerminal,
+    createBranchDraft,
+    gitBranchState.ok,
+    mergeBranchesResponse,
+    selectedExecBranch,
+    showToast,
+    state.projectPath,
+  ]);
+
+  const handleRefreshExecBranches = useCallback(async () => {
+    const projectPath = state.projectPath?.trim();
+    if (!projectPath || isExecuting) return;
+    setGitBranchState({ ok: false, loading: true, error: '' });
+    try {
+      const data = await fetchGitBranches(projectPath);
+      if (!data.ok) {
+        setExecBranchList([]);
+        setSelectedExecBranch('');
+        setExecBranchCurrent('');
+        setGitBranchState({
+          ok: false,
+          loading: false,
+          error: data.error || '读取分支失败',
+        });
+        showToast(data.error || '读取分支失败');
+        return;
+      }
+      mergeBranchesResponse(data, false);
+      setGitBranchState({ ok: true, loading: false, error: '' });
+      showToast('✅ 分支列表已刷新');
+    } catch (e) {
+      setGitBranchState({
+        ok: false,
+        loading: false,
+        error: e.message || '网络错误',
+      });
+      showToast(e.message);
+    }
+  }, [isExecuting, mergeBranchesResponse, showToast, state.projectPath]);
 
   const handleDownloadPromptResources = () => {
     if (promptResources.every((item) => !item.content.trim())) {
@@ -633,16 +852,23 @@ ${skillsBlock}
 
   const handleExecute = async () => {
     if (!validateExecutionPrerequisites()) return;
-
     stopRequestedRef.current = false;
     currentStepIdRef.current = '';
     setExecutionMode('full');
     setTerminalVisible(true);
     setIsExecuting(true);
     setTerminalOutput('');
-    setTerminalStatus(`准备使用 ${selectedEngine === 'claude' ? 'Claude Code' : 'Cursor CLI'} 执行...`);
+    setTerminalStatus('检查 Git 执行分支...');
 
     try {
+      const branchOk = await syncExecutionBranch();
+      if (!branchOk.ok) {
+        setIsExecuting(false);
+        setTerminalStatus('分支检查失败');
+        return;
+      }
+      setTerminalStatus(`准备使用 ${selectedEngine === 'claude' ? 'Claude Code' : 'Cursor CLI'} 执行...`);
+
       const prepareResult = await prepareExecutionResources();
       if (prepareResult.aborted) {
         setIsExecuting(false);
@@ -788,9 +1014,17 @@ ${skillsBlock}
     setTerminalVisible(true);
     setTerminalOutput('');
     setIsExecuting(true);
-    setTerminalStatus(`准备分步执行 ${selectedSteps.length} 个步骤...`);
+    setTerminalStatus('检查 Git 执行分支...');
 
     try {
+      const branchOk = await syncExecutionBranch();
+      if (!branchOk.ok) {
+        setIsExecuting(false);
+        setTerminalStatus('分支检查失败');
+        return;
+      }
+
+      setTerminalStatus(`准备分步执行 ${selectedSteps.length} 个步骤...`);
       const prepareResult = await prepareExecutionResources();
       if (prepareResult.aborted) {
         setIsExecuting(false);
@@ -894,6 +1128,7 @@ ${skillsBlock}
     stepIndexMap,
     updateStepRuntime,
     validateExecutionPrerequisites,
+    syncExecutionBranch,
   ]);
 
   const handleRollbackStep = useCallback(async (stepId, options = {}) => {
@@ -936,7 +1171,10 @@ ${skillsBlock}
     await executeSelectedSteps([stepId]);
   }, [executeSelectedSteps, handleRollbackStep]);
 
-  const canExecute = Boolean(selectedEngine) && !isExecuting;
+  /** 仅在实际任务执行（立即/分步 CLI）进行中锁定，与「停止执行」一致 */
+  const branchSwitchLocked = isExecuting;
+  const gitReadyForRun = Boolean(state.projectPath?.trim()) && gitBranchState.ok && !gitBranchState.loading;
+  const canExecute = Boolean(selectedEngine) && !isExecuting && gitReadyForRun;
   const canOpenStepwise = !skillsLoading && !isExecuting && !isNormalizingSteps;
   const canInstallAllSkills = Boolean(state.projectPath)
     && installableSkillPackagesPlan.orderedPackages.length > 0
@@ -1092,6 +1330,129 @@ ${skillsBlock}
           )}
         </div>
 
+        <div
+          style={{
+            marginBottom: 20,
+            padding: '14px 16px',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            background: 'var(--panel-muted, rgba(0, 0, 0, 0.04))',
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 10 }}>执行分支</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 220, flex: '1 1 240px' }}>
+              <span style={{ fontSize: '0.88em', opacity: 0.85 }}>目标分支（git branch -a）</span>
+              <select
+                className="form-select"
+                value={selectedExecBranch}
+                disabled={!state.projectPath?.trim() || gitBranchState.loading || branchSwitchLocked}
+                onChange={(e) => setSelectedExecBranch(e.target.value)}
+              >
+                {execBranchList.length === 0 && !gitBranchState.loading ? (
+                  <option value="">（无分支）</option>
+                ) : null}
+                {execBranchList.map((b) => (
+                  <option key={b.name} value={b.name}>
+                    {b.name}{b.name === execBranchCurrent ? ' · 当前' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleRefreshExecBranches}
+              disabled={!state.projectPath?.trim() || gitBranchState.loading || branchSwitchLocked}
+            >
+              {gitBranchState.loading ? '刷新中…' : '🔄 刷新分支'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={openCreateBranchModal}
+              disabled={!state.projectPath?.trim() || gitBranchState.loading || branchSwitchLocked || !gitBranchState.ok}
+            >
+              ➕ 新建本地分支
+            </button>
+          </div>
+          {!state.projectPath?.trim() ? (
+            <div className="form-hint" style={{ marginTop: 10 }}>请先在第一步填写项目路径以读取 Git 分支。</div>
+          ) : gitBranchState.loading ? (
+            <div className="form-hint" style={{ marginTop: 10 }}>正在读取分支列表…</div>
+          ) : !gitBranchState.ok ? (
+            <div className="form-hint" style={{ marginTop: 10, color: 'var(--danger, #c62828)' }}>
+              {gitBranchState.error || '无法读取 Git 分支，「立即执行 / 分步执行」已禁用。'}
+            </div>
+          ) : (
+            <div className="form-hint" style={{ marginTop: 10 }}>
+              「新建本地分支」会先按当前「目标分支」执行 checkout，再 <code className="mono-input" style={{ fontSize: '0.9em' }}>git checkout -b</code>
+              ；创建后需在「目标分支」中自行切换再执行。任务执行进行中不可改分支。
+            </div>
+          )}
+        </div>
+
+        {createBranchModalOpen ? (
+          <div
+            className="modal-overlay visible"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-branch-modal-title"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) closeCreateBranchModal();
+            }}
+          >
+            <div className="modal" style={{ width: 440 }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div className="modal-title" id="create-branch-modal-title">
+                  新建本地分支
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-icon"
+                  disabled={createBranchBusy}
+                  onClick={closeCreateBranchModal}
+                  aria-label="关闭"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="modal-body">
+                <p className="form-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+                  将以当前下拉里选中的「目标分支」为起点：先 <strong>git checkout</strong> 到该分支，再执行{' '}
+                  <strong>git checkout -b</strong>。创建成功后仍须在下拉里手动切到新分支再执行。
+                </p>
+                <div className="form-group">
+                  <label className="form-label">新分支名称</label>
+                  <input
+                    type="text"
+                    className="form-input mono-input"
+                    placeholder="例如 feature/my-task"
+                    value={createBranchDraft}
+                    disabled={createBranchBusy}
+                    autoComplete="off"
+                    onChange={(e) => setCreateBranchDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !createBranchBusy) {
+                        e.preventDefault();
+                        confirmCreateBranch();
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" disabled={createBranchBusy} onClick={closeCreateBranchModal}>
+                  取消
+                </button>
+                <button type="button" className="btn btn-primary" disabled={createBranchBusy} onClick={confirmCreateBranch}>
+                  {createBranchBusy ? '创建中…' : '确定'}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {terminalVisible && (
           <div className={executionMode === 'stepwise' ? 'stepwise-shell' : ''}>
             <div className="terminal-wrapper">
@@ -1132,7 +1493,7 @@ ${skillsBlock}
                     <button
                       className="btn btn-secondary btn-sm"
                       onClick={() => executeSelectedSteps(selectedStepIds)}
-                      disabled={selectedStepIds.length === 0 || isExecuting}
+                      disabled={selectedStepIds.length === 0 || isExecuting || !gitReadyForRun}
                     >
                       执行已选
                     </button>
@@ -1192,12 +1553,22 @@ ${skillsBlock}
                               <button className="btn btn-secondary btn-sm" onClick={() => handleRollbackStep(step.id)}>
                                 回退
                               </button>
-                              <button className="btn btn-primary btn-sm" onClick={() => handleReexecuteStep(step.id)}>
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-sm"
+                                disabled={!gitReadyForRun}
+                                onClick={() => handleReexecuteStep(step.id)}
+                              >
                                 重新执行
                               </button>
                             </>
                           ) : (
-                            <button className="btn btn-primary btn-sm" onClick={() => executeSelectedSteps([step.id])}>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              disabled={!gitReadyForRun}
+                              onClick={() => executeSelectedSteps([step.id])}
+                            >
                               执行
                             </button>
                           )}

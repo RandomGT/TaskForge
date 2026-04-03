@@ -121,6 +121,47 @@ export async function normalizeTaskOrchestration(payload) {
   return res.json();
 }
 
+/** 读取项目 git 分支（git branch -a）与当前分支 */
+export async function fetchGitBranches(projectPath) {
+  const res = await fetch(`${API_BASE}/git/branches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: data.error || `HTTP ${res.status}`,
+      current: '',
+      branches: [],
+    };
+  }
+  return data;
+}
+
+/**
+ * 按执行前约定切换/新建分支。返回 { ok, logs, error?, current }。
+ */
+export async function ensureGitBranch(projectPath, checkoutTarget, newBranchName = '') {
+  const res = await fetch(`${API_BASE}/git/ensure-branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectPath,
+      checkoutTarget,
+      newBranchName: newBranchName || undefined,
+    }),
+    signal: AbortSignal.timeout(120000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `分支操作失败 HTTP ${res.status}`);
+  }
+  return data;
+}
+
 export async function getRecommendedSkills(payload) {
   const res = await fetch(`${API_BASE}/recommended-skills`, {
     method: 'POST',
