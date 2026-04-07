@@ -14,7 +14,7 @@ export default function Header() {
     <header className="header">
       <div className="header-inner">
         <div className="logo">
-          <img src="/logo.svg" alt="TaskForge" className="logo-icon" />
+          <img src="/assets/logo2.png" alt="TaskForge" className="logo-icon" />
           TaskForge
         </div>
         <div className="header-actions">

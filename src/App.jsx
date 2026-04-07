@@ -54,9 +54,6 @@ function AppInner() {
       <div className="app-container">
         <div className="main-content">
           <div className="panel">
-            <div className="panel-header">
-              <div className="panel-title">🛠️ 任务工坊</div>
-            </div>
             <div className="panel-body">
               <StepIndicator />
               {stepPanels}

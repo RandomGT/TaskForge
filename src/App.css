@@ -78,6 +78,7 @@ body {
 .logo-icon {
   width: 32px;
   height: 32px;
+  object-fit: contain;
 }
 .header-actions {
   display: flex;
@@ -168,20 +169,6 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-}
-.panel-header {
-  padding: 20px 24px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.panel-title {
-  font-size: 16px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 .panel-body {
   padding: 24px;
