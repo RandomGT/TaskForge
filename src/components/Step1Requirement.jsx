@@ -1,11 +1,16 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
 import { checkHealth, getEngines, listProjectFiles } from '../utils/aiService';
+import { buildPersistableState } from '../utils/persistState';
+import { createJob, updateJob } from '../utils/jobApi';
 
 export default function Step1Requirement() {
   const { state, dispatch, showToast } = useAppContext();
+  const navigate = useNavigate();
   const tagInputRef = useRef(null);
   const [checkingEngine, setCheckingEngine] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const engineLookup = Object.fromEntries((state.availableEngines || []).map((engine) => [engine.name, engine]));
 
   // Check server health and available engines on mount
@@ -50,7 +55,7 @@ export default function Step1Requirement() {
     setTimeout(() => el.classList.remove('shake'), 1000);
   }, []);
 
-  const goNext = () => {
+  const goNext = async () => {
     if (!state.projectPath.trim()) {
       shakeElement(document.getElementById('projectPath'));
       showToast('⚠️ 请先填写项目路径');
@@ -73,7 +78,32 @@ export default function Step1Requirement() {
       shakeElement(document.getElementById('requirementDesc'));
       return;
     }
-    dispatch({ type: 'SET_STEP', step: 2 });
+
+    const payload = buildPersistableState(state);
+    payload.currentStep = 2;
+
+    if (state.currentJobId) {
+      dispatch({ type: 'SET_STEP', step: 2 });
+      try {
+        await updateJob(state.currentJobId, payload);
+      } catch (e) {
+        showToast(`⚠️ 保存失败: ${e.message || '请确认后端已启动'}`);
+      }
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const { id } = await createJob(payload);
+      dispatch({ type: 'SET_JOB_ID', id });
+      dispatch({ type: 'SET_STEP', step: 2 });
+      showToast('✅ 已创建任务并保存');
+      navigate(`/wizard/${id}`, { replace: true });
+    } catch (e) {
+      showToast(`❌ 创建任务失败: ${e.message || '请确认后端已启动 (npm start)'}`);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleTagKeyDown = (e) => {
@@ -191,7 +221,7 @@ export default function Step1Requirement() {
           </div>
           {state.aiEngine && engineLookup[state.aiEngine]?.authenticated === false && (
             <div className="form-hint" style={{ color: 'var(--orange)' }}>
-              ⚠️ 当前选择的引擎已安装但未完成认证。请先在终端执行 <code>cursor agent login</code>，或配置 <code>CURSOR_API_KEY</code>。
+              ⚠️ 当前选择的引擎已安装但未完成认证。请先在终端执行 <code>agent login</code>，或配置 <code>CURSOR_API_KEY</code>。
             </div>
           )}
           {!state.serverOnline && (
@@ -261,7 +291,9 @@ export default function Step1Requirement() {
 
       <div className="step-nav">
         <div></div>
-        <button className="btn btn-primary" onClick={goNext}>下一步: 资源配置 →</button>
+        <button className="btn btn-primary" onClick={goNext} disabled={submitting}>
+          {submitting ? '创建并保存…' : '下一步: 资源配置 →'}
+        </button>
       </div>
     </div>
   );

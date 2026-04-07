@@ -13,6 +13,7 @@ import {
 } from 'fs';
 import os from 'os';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { formatFigmaPagesForSplitPrompt } from './src/utils/figmaPages.js';
 
@@ -23,7 +24,47 @@ app.use(express.json({ limit: '5mb' }));
 const PORT = 3721;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+/** Cursor Agent 独立 CLI（PATH 内，默认 `agent`）。旧版为 `cursor agent …`。 */
+const CURSOR_AGENT_BIN = process.env.TASKFORGE_CURSOR_AGENT_BIN || 'agent';
 const CURSOR_PTY_RUNNER = path.join(__dirname, 'scripts', 'cursor_pty_runner.py');
+const JOBS_FILE = path.join(__dirname, 'data', 'jobs.json');
+
+// ---------- persisted jobs (workspace 快照) ----------
+
+function jobMetaFromState(state) {
+  const tasks = Array.isArray(state?.tasks) ? state.tasks : [];
+  const done = tasks.filter((t) => t.status === 'done').length;
+  const running = tasks.filter((t) => t.status === 'running').length;
+  const error = tasks.filter((t) => t.status === 'error').length;
+  const pending = tasks.length - done - running - error;
+  return {
+    projectName: (state?.projectName || '').trim() || '未命名项目',
+    requirementPreview: String(state?.requirementDesc || '').slice(0, 200),
+    currentStep: Number(state?.currentStep) > 0 ? state.currentStep : 1,
+    taskStats: {
+      total: tasks.length,
+      done,
+      running,
+      error,
+      pending: Math.max(0, pending),
+    },
+  };
+}
+
+function loadAllJobs() {
+  try {
+    if (!existsSync(JOBS_FILE)) return [];
+    const raw = JSON.parse(readFileSync(JOBS_FILE, 'utf8'));
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAllJobs(jobs) {
+  mkdirSync(path.dirname(JOBS_FILE), { recursive: true });
+  writeFileSync(JOBS_FILE, JSON.stringify(jobs, null, 0), 'utf8');
+}
 
 // ---------- helpers ----------
 
@@ -285,8 +326,8 @@ function buildCliArgs(engine, prompt) {
 
   if (engine === 'cursor') {
     return {
-      command: 'cursor',
-      args: ['agent', '-p', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--approve-mcps', prompt],
+      command: CURSOR_AGENT_BIN,
+      args: ['-p', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--approve-mcps', prompt],
       mode: 'cursor-stream-json',
       usePty: true,
     };
@@ -465,7 +506,7 @@ function formatCliError(code, stderr = '', engine = '') {
   if (/Authentication required/i.test(text)) {
     if (engine === 'cursor') {
       return {
-        message: 'Cursor Agent 未登录或无可用凭证。请先运行 `cursor agent login`，或设置 `CURSOR_API_KEY`。',
+        message: `Cursor Agent 未登录或无可用凭证。请先运行 \`${CURSOR_AGENT_BIN} login\`，或设置 \`CURSOR_API_KEY\`。`,
         stderr: text,
       };
     }
@@ -1504,8 +1545,8 @@ app.get('/api/engines', async (req, res) => {
   const probeCursorAuth = () =>
     new Promise((resolve) => {
       const proc = spawn(
-        'cursor',
-        ['agent', 'status'],
+        CURSOR_AGENT_BIN,
+        ['status'],
         { shell: false, timeout: 15000 },
       );
       let stdout = '';
@@ -1522,7 +1563,7 @@ app.get('/api/engines', async (req, res) => {
         engine.authenticated = code === 0 && /logged in/i.test(combined);
         engine.authMessage = code === 0
           ? 'Cursor Agent 已认证，可直接执行'
-          : (stderr.trim() || stdout.trim() || 'Cursor CLI 已安装，但未登录或当前凭证不可用。请先执行 cursor agent login，或配置 CURSOR_API_KEY。');
+          : (stderr.trim() || stdout.trim() || `Cursor CLI 已安装，但未登录或当前凭证不可用。请先执行 ${CURSOR_AGENT_BIN} login，或配置 CURSOR_API_KEY。`);
         resolve();
       });
       proc.on('error', (err) => {
@@ -1537,7 +1578,7 @@ app.get('/api/engines', async (req, res) => {
 
   await Promise.all([
     check('claude', 'claude'),
-    check('cursor', 'cursor'),
+    check('cursor', CURSOR_AGENT_BIN),
   ]);
 
   if (engines.some((item) => item.name === 'cursor')) {
@@ -1583,8 +1624,8 @@ app.post('/api/split', (req, res) => {
     command = 'claude';
     args = ['-p', prompt, '--output-format', 'text'];
   } else if (engine === 'cursor') {
-    command = 'cursor';
-    args = ['agent', '-p', '--output-format', 'text', '--force', prompt];
+    command = CURSOR_AGENT_BIN;
+    args = ['-p', '--output-format', 'text', '--force', prompt];
   } else {
     sendSSE('error', { message: `不支持的引擎: ${engine}` });
     res.end();
@@ -1661,8 +1702,8 @@ app.post('/api/orchestrate-split', (req, res) => {
     command = 'claude';
     args = ['-p', prompt, '--output-format', 'text'];
   } else if (engine === 'cursor') {
-    command = 'cursor';
-    args = ['agent', '-p', '--output-format', 'text', '--force', prompt];
+    command = CURSOR_AGENT_BIN;
+    args = ['-p', '--output-format', 'text', '--force', prompt];
   } else {
     sendSSE('error', { message: `不支持的引擎: ${engine}` });
     res.end();
@@ -1830,8 +1871,8 @@ app.post('/api/normalize-orchestration', (req, res) => {
     command = 'claude';
     args = ['-p', prompt, '--output-format', 'text'];
   } else if (engine === 'cursor') {
-    command = 'cursor';
-    args = ['agent', '-p', '--output-format', 'text', '--force', prompt];
+    command = CURSOR_AGENT_BIN;
+    args = ['-p', '--output-format', 'text', '--force', prompt];
   } else {
     return res.status(400).json({ error: `不支持的引擎: ${engine}` });
   }
@@ -1976,6 +2017,90 @@ app.post('/api/ls', (req, res) => {
   proc.on('error', () => {
     res.json({ files: [] });
   });
+});
+
+// Workspace 任务列表（持久化在 data/jobs.json）
+app.get('/api/jobs', (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+  const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30));
+
+  let jobs = loadAllJobs();
+  jobs = [...jobs].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+  if (q) {
+    jobs = jobs.filter((j) => {
+      const m = j.meta || {};
+      const desc = String(j.state?.requirementDesc || '').toLowerCase();
+      const hay = `${m.projectName || ''} ${m.requirementPreview || ''} ${desc}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  const slice = jobs.slice(offset, offset + limit);
+  res.json({
+    jobs: slice.map((j) => ({
+      id: j.id,
+      createdAt: j.createdAt,
+      updatedAt: j.updatedAt,
+      ...j.meta,
+    })),
+    total: jobs.length,
+    hasMore: offset + limit < jobs.length,
+  });
+});
+
+app.get('/api/jobs/:id', (req, res) => {
+  const jobs = loadAllJobs();
+  const j = jobs.find((x) => x.id === req.params.id);
+  if (!j) return res.status(404).json({ error: 'Not found' });
+  res.json({
+    id: j.id,
+    createdAt: j.createdAt,
+    updatedAt: j.updatedAt,
+    meta: j.meta,
+    state: j.state,
+  });
+});
+
+app.post('/api/jobs', (req, res) => {
+  const clientState = req.body?.state;
+  if (!clientState || typeof clientState !== 'object') {
+    return res.status(400).json({ error: 'Missing state' });
+  }
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const meta = jobMetaFromState(clientState);
+  const row = { id, createdAt: now, updatedAt: now, meta, state: clientState };
+  const all = loadAllJobs();
+  all.unshift(row);
+  saveAllJobs(all);
+  res.json({ id, meta });
+});
+
+app.put('/api/jobs/:id', (req, res) => {
+  const clientState = req.body?.state;
+  if (!clientState || typeof clientState !== 'object') {
+    return res.status(400).json({ error: 'Missing state' });
+  }
+  const all = loadAllJobs();
+  const idx = all.findIndex((j) => j.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: 'Not found' });
+  const now = new Date().toISOString();
+  all[idx] = {
+    ...all[idx],
+    updatedAt: now,
+    meta: jobMetaFromState(clientState),
+    state: clientState,
+  };
+  saveAllJobs(all);
+  res.json({ ok: true });
+});
+
+app.delete('/api/jobs/:id', (req, res) => {
+  const all = loadAllJobs().filter((j) => j.id !== req.params.id);
+  saveAllJobs(all);
+  res.json({ ok: true });
 });
 
 app.listen(PORT, () => {

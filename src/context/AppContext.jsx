@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useReducer, useCallback } from 'react';
 import { emptyFigmaLink, normalizeFigmaPagesFromLegacy } from '../utils/figmaPages';
 import { createExecutionPlan, createIntentGraph, createTaskGraph, createWorkspaceSpec } from '../domains/pipeline/models';
 
@@ -52,6 +52,9 @@ const initialState = {
   executingTaskIndex: -1,
   executionLog: '',
   executionStatus: '',
+
+  /** 服务端保存的 workspace id（URL /wizard/:jobId），不在 buildPersistableState 里持久化 */
+  currentJobId: null,
 };
 
 let taskIdCounter = 0;
@@ -96,6 +99,9 @@ function reducer(state, action) {
       return { ...state, executingTaskIndex: -1, executionStatus: '' };
     case 'EXEC_ERROR':
       return { ...state, executingTaskIndex: -1, executionStatus: '', executionLog: state.executionLog + '\n❌ ' + action.message };
+
+    case 'SET_JOB_ID':
+      return { ...state, currentJobId: action.id || null };
 
     case 'SET_TECH_STACK':
       return { ...state, techStack: action.value };
@@ -438,7 +444,8 @@ function reducer(state, action) {
 
     // Load from storage
     case 'LOAD_STATE': {
-      const loaded = action.state;
+      const loaded = { ...action.state };
+      delete loaded.currentJobId;
       if (loaded.tasks && loaded.tasks.length > 0) {
         const maxId = Math.max(...loaded.tasks.map(t => t.id || 0));
         if (maxId > taskIdCounter) taskIdCounter = maxId;
@@ -457,7 +464,7 @@ function reducer(state, action) {
         promptPackages: Array.isArray(loaded.promptPackages) ? loaded.promptPackages : [],
         splitDrafts: loaded.splitDrafts || state.splitDrafts,
         splitStarted: Boolean(loaded.splitStarted),
-        currentStep: 1,
+        currentStep: Number(loaded.currentStep) > 0 ? loaded.currentStep : 1,
         modalVisible: false,
         editingTaskIndex: -1,
         toasts: [],
@@ -482,44 +489,6 @@ function reducer(state, action) {
 
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const saveTimerRef = useRef(null);
-
-  // Load from localStorage on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('taskforge_state');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        dispatch({ type: 'LOAD_STATE', state: parsed });
-      }
-    } catch (e) { /* ignore */ }
-  }, []);
-
-  const autoSave = useCallback(() => {
-    clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      try {
-        const toSave = { ...state };
-        delete toSave.toasts;
-        delete toSave.modalVisible;
-        delete toSave.editingTaskIndex;
-        delete toSave.aiLoading;
-        delete toSave.aiLog;
-        delete toSave.aiStatus;
-        delete toSave.executingTaskIndex;
-        delete toSave.executionLog;
-        delete toSave.executionStatus;
-        delete toSave.serverOnline;
-        delete toSave.availableEngines;
-        delete toSave.projectFiles;
-        localStorage.setItem('taskforge_state', JSON.stringify(toSave));
-      } catch (e) { /* ignore */ }
-    }, 500);
-  }, [state]);
-
-  useEffect(() => {
-    autoSave();
-  }, [state, autoSave]);
 
   const showToast = useCallback((message) => {
     const id = Date.now();
