@@ -1,0 +1,468 @@
+{
+  "version": 1,
+  "updatedAt": "2026-04-08T10:24:26.064Z",
+  "sourceUrl": "https://ckai-skills-backend-test2.test.xdf.cn/api/skills",
+  "total": 20,
+  "skills": [
+    {
+      "id": "929bbf3b-7559-4466-a742-7615a6f87809",
+      "name": "learning-container-integration",
+      "description": "资源渲染sdk接入 当用户想接入LearningContainer时可以从本 Skill 内嵌的 references/templates 读取完整 Kotlin/XML 模板，按用户包名与前缀生成 LearningContainer 接入代码（容器、Fetcher、Parser、ResInfo、样式、响应占位）与 Gradle 依赖说明；XXXX/XXX 由用户命名；业务 TODO 保留。",
+      "installMethod": "npm install @xdf-skills/learning-container-integration",
+      "npmName": "@xdf-skills/learning-container-integration",
+      "tags": [
+        "Android",
+        "LearningContainer",
+        "Kotlin",
+        "Gradle",
+        "XDF",
+        "Skill"
+      ],
+      "keywords": [
+        "Android",
+        "LearningContainer",
+        "Kotlin",
+        "Gradle",
+        "XDF",
+        "Skill"
+      ]
+    },
+    {
+      "id": "46521f1f-881f-4f01-9a5d-ab75bcdfb6ad",
+      "name": "serena",
+      "description": "基于 LSP 的符号级代码理解与导航：查找符号、引用、重命名与精准编辑，适用于复杂多文件工程。",
+      "installMethod": "npm install @xdf-skills/serena",
+      "npmName": "@xdf-skills/serena",
+      "tags": [
+        "lsp",
+        "symbol-navigation",
+        "refactoring",
+        "code-intelligence",
+        "agent-tools"
+      ],
+      "keywords": [
+        "lsp",
+        "symbol-navigation",
+        "refactoring",
+        "code-intelligence",
+        "agent-tools"
+      ]
+    },
+    {
+      "id": "733c0401-226a-47dd-9824-0056198a1bba",
+      "name": "xdf-cos-image-upload",
+      "description": "指导 XDF 系 Android 应用中 COS 上传的完整配置与用法：coslib（CosUploadHelper + IUploadCosWorkParams）用于业务图片/文件，Sherlock（CosUploader + ICosUploadConfig）用于调度侧日志上传；说明与网关、凭证路径、CommonConfigParams 通用 Header、Pad 登录态（u2at、studentCode、schoolId）的对齐方式。在用户实现或排查 COS 上传、CosUploadObject、CosParamsServiceImpl、CosUploader、凭证 401、BaseUrl 不一致时使用。",
+      "installMethod": "npm install @xdf-skills/xdf-cos-image-upload",
+      "npmName": "@xdf-skills/xdf-cos-image-upload",
+      "tags": [
+        "android",
+        "kotlin",
+        "cos",
+        "coslib",
+        "tencent-cloud",
+        "object-storage",
+        "xdf-notebook",
+        "sherlock",
+        "CosUploader",
+        "CommonConfigParams",
+        "image-upload",
+        "credential"
+      ],
+      "keywords": [
+        "android",
+        "kotlin",
+        "cos",
+        "coslib",
+        "tencent-cloud",
+        "object-storage",
+        "xdf-notebook",
+        "sherlock",
+        "CosUploader",
+        "CommonConfigParams",
+        "image-upload",
+        "credential"
+      ]
+    },
+    {
+      "id": "30942588-8d86-44ec-b9f0-b99f1b14b80c",
+      "name": "android-jetpack-compose",
+      "description": "Use when building Android UIs with Jetpack Compose, managing state with remember/mutableStateOf, or implementing declarative UI patterns.\\nallowed-tools:\\n- Read\\n- Write\\n- Edit\\n- Bash\\n- Grep\\n- Glob",
+      "installMethod": "npm install @xdf-skills/android-jetpack-compose",
+      "npmName": "@xdf-skills/android-jetpack-compose",
+      "tags": [
+        "android",
+        "ui",
+        "compose",
+        "remember",
+        "stateManagement",
+        "practices"
+      ],
+      "keywords": [
+        "android",
+        "ui",
+        "compose",
+        "remember",
+        "stateManagement",
+        "practices"
+      ]
+    },
+    {
+      "id": "e7dcb779-f8d4-4aba-a13d-a524c974cbb6",
+      "name": "compose-file-structure",
+      "description": "Compose 文件结构规范。单个文件中最多保留两个 @Composable 方法，超出则拆到独立文件；每个拆分出的文件内需包含一个 @Preview。在编写或审查 Jetpack Compose UI、Composable 函数、页面/组件时使用。",
+      "installMethod": "npm install @xdf-skills/compose-file-structure",
+      "npmName": "@xdf-skills/compose-file-structure",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "compose",
+        "jetpack",
+        "kotlin",
+        "ui"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "compose",
+        "jetpack",
+        "kotlin",
+        "ui"
+      ]
+    },
+    {
+      "id": "3d3cd888-a556-44e0-bb14-b911b0ab0134",
+      "name": "hermes-flutter",
+      "description": "在 Flutter 项目中使用 Hermes 网络请求框架及 hermes_plugin 代码生成。适用于添加网络请求、配置拦截器、类型安全 JSON 解析、文件上传下载、HermesX 快速 API 等场景。",
+      "installMethod": "npm install @xdf-skills/hermes-flutter",
+      "npmName": "@xdf-skills/hermes-flutter",
+      "tags": [
+        "flutter",
+        "hermes",
+        "network",
+        "http",
+        "dart"
+      ],
+      "keywords": [
+        "flutter",
+        "hermes",
+        "network",
+        "http",
+        "dart"
+      ]
+    },
+    {
+      "id": "60db5d11-0458-437c-89ae-f8a88a594078",
+      "name": "flutter-architecture",
+      "description": "Flutter 四层组件化 + MVVM 项目架构规范。适用于 Flutter 项目开发、新模块创建、目录结构设计、代码评审、架构对齐。支持在项目中直接创建/搭建整套 MVVM+组件化目录结构。",
+      "installMethod": "npm install @xdf-skills/flutter-architecture",
+      "npmName": "@xdf-skills/flutter-architecture",
+      "tags": [
+        "flutter",
+        "architecture",
+        "mvvm",
+        "component",
+        "dart"
+      ],
+      "keywords": [
+        "flutter",
+        "architecture",
+        "mvvm",
+        "component",
+        "dart"
+      ]
+    },
+    {
+      "id": "d832f86d-496b-4d6f-82dc-09294427604a",
+      "name": "xrouter-basic-usage",
+      "description": "集成与使用 XRouter 学习机路由工具。适用场景：Android 组件化路由、应用内/跨应用跳转、路由协议 xdfapp/xdfpad、注解映射、拦截器。Use when working with XRouter, cn.xdf.xroute, @XRoute, @XInterceptor, RouterBuild.",
+      "installMethod": "npm install @xdf-skills/xrouter-basic-usage",
+      "npmName": "@xdf-skills/xrouter-basic-usage",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "xrouter",
+        "路由",
+        "组件化",
+        "学习机"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "xrouter",
+        "路由",
+        "组件化",
+        "学习机"
+      ]
+    },
+    {
+      "id": "1f1c1b5c-64fc-4d24-b18d-ff548b82575c",
+      "name": "zeus-basic-usage",
+      "description": "集成与使用 Zeus 平板底层能力框架。适用场景：XDF 平板设备初始化、设备信息获取、焦点模式/强制控制、Activity 与任务管理、静默安装卸载。Use when working with cn.xdf.zeus, Zeus.init, ZeusDeviceInfo, ZeusForceControl, ZeusActivityManager.",
+      "installMethod": "npm install @xdf-skills/zeus-basic-usage",
+      "npmName": "@xdf-skills/zeus-basic-usage",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "zeus",
+        "平板",
+        "rom",
+        "设备信息",
+        "焦点模式"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "zeus",
+        "平板",
+        "rom",
+        "设备信息",
+        "焦点模式"
+      ]
+    },
+    {
+      "id": "893b1147-fe89-4cd5-955a-5128b01f3f9b",
+      "name": "moonbridge-ts",
+      "description": "快速生成并联调 MoonBridge IPC（moonbridge-ts）的 Node Server / Client、模块接收（BridgeModule）与 RPC 装饰器调用示例。",
+      "installMethod": "npm install @xdf-skills/moonbridge-ts",
+      "npmName": "@xdf-skills/moonbridge-ts",
+      "tags": [
+        "moonbridge",
+        "ipc",
+        "websocket",
+        "typescript",
+        "node"
+      ],
+      "keywords": [
+        "moonbridge",
+        "ipc",
+        "websocket",
+        "typescript",
+        "node"
+      ]
+    },
+    {
+      "id": "d9b49c4d-6723-4dcc-bf1a-00f4cdb2468a",
+      "name": "mediaflow-usage",
+      "description": "集成与使用 MediaFlow 媒体操作流式框架。适用场景：Android 链式组合拍照、相册选择、剪裁、压缩、录制、上传等媒体操作；图片/视频/音频/涂鸦流程编排。",
+      "installMethod": "npm install @xdf-skills/mediaflow-usage",
+      "npmName": "@xdf-skills/mediaflow-usage",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "mediaflow",
+        "mediatool"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "mediaflow",
+        "mediatool"
+      ]
+    },
+    {
+      "id": "e7f896a0-513d-4a02-8336-6669048d582b",
+      "name": "lib-starter-integration",
+      "description": "集成与使用 lib_starter 与 lib_starter_plugin 启动框架的指引。适用场景：Android 应用启动优化、按依赖拓扑执行启动任务、使用 JSON 配置或手动配置启动项、替换 LaunchTask。",
+      "installMethod": "npm install @xdf-skills/lib-starter-integration",
+      "npmName": "@xdf-skills/lib-starter-integration",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-starter",
+        "startup"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-starter",
+        "startup"
+      ]
+    },
+    {
+      "id": "f5fb4443-bcd0-48cf-9ac4-5a8415099472",
+      "name": "n-router-flutter",
+      "description": "为 Flutter 的 n_router 路由框架提供“快速接入/使用示例/常见问题排查”指引；可根据现有项目代码生成推荐的初始化、页面声明、路由工厂生成与导航调用模板。",
+      "installMethod": "npm install @xdf-skills/n-router-flutter",
+      "npmName": "@xdf-skills/n-router-flutter",
+      "tags": [
+        "flutter",
+        "router",
+        "navigation",
+        "codegen",
+        "n_router"
+      ],
+      "keywords": [
+        "flutter",
+        "router",
+        "navigation",
+        "codegen",
+        "n_router"
+      ]
+    },
+    {
+      "id": "c4b56cab-3ae4-428b-9f32-f018bdb6d896",
+      "name": "lib-alert-usage",
+      "description": "集成与使用 lib_alert 弹窗组件库。提供 AlertView 通用对话框、SettingPageAlertView 设置选项弹窗、PhotoChannelAlertView 照片渠道选择弹窗。在需要为 Android 添加弹窗、确认框、选择框时应用此技能。",
+      "installMethod": "npm install @xdf-skills/lib-alert-usage",
+      "npmName": "@xdf-skills/lib-alert-usage",
+      "tags": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-alert",
+        "弹窗"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-alert",
+        "弹窗"
+      ]
+    },
+    {
+      "id": "8dbf754b-e525-491c-8a95-b6fb2a8f22bc",
+      "name": "lib-shadow-usage",
+      "description": "集成与使用 lib_shadow 阴影组件库。提供 FrameLayout/LinearLayout/ConstraintLayout 的带阴影、圆角容器。在需要为 Android 视图添加阴影、圆角背景时应用此技能。",
+      "installMethod": "npm install @xdf-skills/lib-shadow-usage",
+      "npmName": "@xdf-skills/lib-shadow-usage",
+      "tags": [
+        "[cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-shadow",
+        "阴影]"
+      ],
+      "keywords": [
+        "[cursor",
+        "skill",
+        "xdf",
+        "android",
+        "lib-shadow",
+        "阴影]"
+      ]
+    },
+    {
+      "id": "9e19b55f-465a-4860-9e75-c9ad530f403b",
+      "name": "moonbridge-android-ipc-usage",
+      "description": "Android 项目中接入与使用 MoonBridge IPC 跨进程通信。适用场景：同应用内主进程与子进程通信、跨应用进程通信、定义 IPC Module、通过 RPC 接口调用远程方法。",
+      "installMethod": "npm install @xdf-skills/moonbridge-android-ipc-usage",
+      "npmName": "@xdf-skills/moonbridge-android-ipc-usage",
+      "tags": [
+        "Android",
+        "MoonBridge",
+        "IPC",
+        "跨进程",
+        "RPC"
+      ],
+      "keywords": [
+        "Android",
+        "MoonBridge",
+        "IPC",
+        "跨进程",
+        "RPC"
+      ]
+    },
+    {
+      "id": "52207641-1f37-4f32-a97c-54d68c4b004b",
+      "name": "moonbridge-android-basic-usage",
+      "description": "Android 项目中接入、初始化与使用 MoonBridge 原生-JS 通信层。不包含 IPC。适用场景：集成 MoonBridge、配置 WebViewSettings、定义 Module、JS 与 Android 双向调用。",
+      "installMethod": "npm install @xdf-skills/moonbridge-android-basic-usage",
+      "npmName": "@xdf-skills/moonbridge-android-basic-usage",
+      "tags": [
+        "Android",
+        "项目中接入、初始化与使用",
+        "MoonBridge"
+      ],
+      "keywords": [
+        "Android",
+        "项目中接入、初始化与使用",
+        "MoonBridge"
+      ]
+    },
+    {
+      "id": "ed7fc907-b64d-4f6d-b51f-8cbe9fc8e07b",
+      "name": "taskflow-usage",
+      "description": "使用 XDFNotebook 中 cn.xdf.notebook.sync.flow 的 TaskFlow 编排顺序任务链。适用于需要将多个依赖前置结果的任务串行执行、处理失败与提前退出的场景，如：下载→解压→写入、同步流程、笔记创建流程等。",
+      "installMethod": "npm install @xdf-skills/taskflow-usage",
+      "npmName": "@xdf-skills/taskflow-usage",
+      "tags": [
+        "taskflow",
+        "kotlin",
+        "android",
+        "cursor",
+        "sync",
+        "XDFNotebook"
+      ],
+      "keywords": [
+        "taskflow",
+        "kotlin",
+        "android",
+        "cursor",
+        "sync",
+        "XDFNotebook"
+      ]
+    },
+    {
+      "id": "5fa3f11b-72ee-4183-97e3-fb823db79414",
+      "name": "webhook-skill-publish",
+      "description": "通过 Webhook 将 Cursor Skills 推送到 XdfSkills（XDFSkills）平台，支持多文件上传并触发 npm publish。",
+      "installMethod": "npm install @xdf-skills/webhook-skill-publish",
+      "npmName": "@xdf-skills/webhook-skill-publish",
+      "tags": [
+        "cursor",
+        "skill",
+        "webhook",
+        "publish",
+        "xdfskills"
+      ],
+      "keywords": [
+        "cursor",
+        "skill",
+        "webhook",
+        "publish",
+        "xdfskills"
+      ]
+    },
+    {
+      "id": "0ebac5db-dd85-495d-88bc-171d65611ee4",
+      "name": "daily-report-webhook",
+      "description": "日报机器人",
+      "installMethod": "npm install @xdf-skills/daily-report-webhook",
+      "npmName": "@xdf-skills/daily-report-webhook",
+      "tags": [
+        "Cursor",
+        "日报",
+        "Webhook"
+      ],
+      "keywords": [
+        "Cursor",
+        "日报",
+        "Webhook"
+      ]
+    }
+  ]
+}

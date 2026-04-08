@@ -1,12 +1,23 @@
 import React from 'react';
 import { useAppContext } from '../context/AppContext';
+import { persistJobState } from '../utils/jobApi';
 import FigmaPageSection from './ResourceCards/FigmaPageSection';
 import ApiCard from './ResourceCards/ApiCard';
 import ImageCard from './ResourceCards/ImageCard';
 import OtherResourceCard from './ResourceCards/OtherResourceCard';
 
 export default function Step2Resources() {
-  const { state, dispatch } = useAppContext();
+  const { state, dispatch, showToast } = useAppContext();
+
+  const jumpToStep = async (step) => {
+    dispatch({ type: 'SET_STEP', step });
+    if (!state.currentJobId) return;
+    try {
+      await persistJobState(state.currentJobId, state, { currentStep: step });
+    } catch {
+      showToast('⚠️ 资源配置已更新，但立即保存失败');
+    }
+  };
 
   return (
     <div className="step-content active fade-in">
@@ -59,8 +70,8 @@ export default function Step2Resources() {
       </div>
 
       <div className="step-nav">
-        <button className="btn btn-secondary" onClick={() => dispatch({ type: 'SET_STEP', step: 1 })}>← 上一步</button>
-        <button className="btn btn-primary" onClick={() => dispatch({ type: 'SET_STEP', step: 3 })}>下一步: 任务拆分 →</button>
+        <button className="btn btn-secondary" onClick={() => jumpToStep(1)}>← 上一步</button>
+        <button className="btn btn-primary" onClick={() => jumpToStep(3)}>下一步: 任务拆分 →</button>
       </div>
     </div>
   );

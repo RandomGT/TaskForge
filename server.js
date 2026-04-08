@@ -28,6 +28,8 @@ const __dirname = path.dirname(__filename);
 const CURSOR_AGENT_BIN = process.env.TASKFORGE_CURSOR_AGENT_BIN || 'agent';
 const CURSOR_PTY_RUNNER = path.join(__dirname, 'scripts', 'cursor_pty_runner.py');
 const JOBS_FILE = path.join(__dirname, 'data', 'jobs.json');
+const SKILLS_CACHE_FILE = path.join(__dirname, 'data', 'skills-catalog.json');
+const SKILLS_SOURCE_URL = 'https://ckai-skills-backend-test2.test.xdf.cn/api/skills';
 
 // ---------- persisted jobs (workspace 快照) ----------
 
@@ -344,12 +346,232 @@ function getCliOptions(cli, cwd) {
 }
 
 async function fetchSkillsCatalog() {
-  const res = await fetch('https://ckai-skills-backend-test2.test.xdf.cn/api/skills');
+  const res = await fetch(SKILLS_SOURCE_URL);
   if (!res.ok) {
     throw new Error(`Skills API HTTP ${res.status}`);
   }
   const data = await res.json();
   return Array.isArray(data?.data) ? data.data : [];
+}
+
+function parseNpmPackageName(text = '') {
+  const match = String(text).match(/(?:npm\s+(?:install|i)|pnpm\s+add|yarn\s+add)\s+([@a-zA-Z0-9._/-]+)/);
+  return match?.[1]?.trim() || '';
+}
+
+function resolveSkillDescription(skill = {}) {
+  const candidates = [
+    skill.description,
+    skill.describtion,
+    skill.desc,
+    skill.summary,
+    skill.introduction,
+  ];
+  const text = candidates.find((item) => typeof item === 'string' && item.trim());
+  return text ? text.trim() : '';
+}
+
+function resolveSkillInstallMethod(skill = {}) {
+  const candidates = [
+    skill.installMethod,
+    skill.installationMethod,
+    skill.installation,
+    skill.installMode,
+    skill.install_mode,
+    skill.installCommand,
+    skill.install_command,
+    skill.howToInstall,
+  ];
+  const text = candidates.find((item) => typeof item === 'string' && item.trim());
+  if (text) return text.trim();
+  const npmName = String(skill.npmName || skill.packageName || skill.package || '').trim();
+  return npmName ? `npm install ${npmName}` : '';
+}
+
+function resolveSkillNpmName(skill = {}, installMethod = '') {
+  const candidates = [
+    skill.npmName,
+    skill.packageName,
+    skill.package,
+    skill.npm,
+  ];
+  const text = candidates.find((item) => typeof item === 'string' && item.trim());
+  return text ? text.trim() : parseNpmPackageName(installMethod);
+}
+
+function normalizeSkillRecord(skill = {}, index = 0) {
+  const name = String(skill.name || skill.title || `Skill ${index + 1}`).trim();
+  const installMethod = resolveSkillInstallMethod(skill);
+  const npmName = resolveSkillNpmName(skill, installMethod);
+  return {
+    id: String(skill.id || skill.skillId || npmName || name || `skill-${index + 1}`).trim(),
+    name,
+    description: resolveSkillDescription(skill),
+    installMethod,
+    npmName,
+    tags: Array.isArray(skill.tags) ? skill.tags.filter(Boolean).map((item) => String(item).trim()) : [],
+    keywords: Array.isArray(skill.keywords) ? skill.keywords.filter(Boolean).map((item) => String(item).trim()) : [],
+  };
+}
+
+function readSkillsCatalogCache() {
+  try {
+    if (!existsSync(SKILLS_CACHE_FILE)) return null;
+    const raw = JSON.parse(readFileSync(SKILLS_CACHE_FILE, 'utf8'));
+    const skills = Array.isArray(raw?.skills)
+      ? raw.skills.map((skill, index) => normalizeSkillRecord(skill, index))
+      : [];
+    return {
+      version: Number(raw?.version) || 1,
+      updatedAt: String(raw?.updatedAt || ''),
+      sourceUrl: String(raw?.sourceUrl || SKILLS_SOURCE_URL),
+      total: Number(raw?.total) || skills.length,
+      skills,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeSkillsCatalogCache(payload) {
+  mkdirSync(path.dirname(SKILLS_CACHE_FILE), { recursive: true });
+  writeFileSync(SKILLS_CACHE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+}
+
+function buildSkillIdentity(skill = {}) {
+  return [
+    String(skill.id || '').trim().toLowerCase(),
+    String(skill.npmName || '').trim().toLowerCase(),
+    String(skill.name || '').trim().toLowerCase(),
+  ].find(Boolean) || '';
+}
+
+function buildSkillFingerprint(skill = {}) {
+  return JSON.stringify([
+    String(skill.id || '').trim(),
+    String(skill.name || '').trim(),
+    String(skill.description || '').trim(),
+    String(skill.installMethod || '').trim(),
+    String(skill.npmName || '').trim(),
+  ]);
+}
+
+function mergeSkillsCatalog(existingSkills = [], incomingSkills = []) {
+  const merged = [];
+  const seen = new Set();
+  [...incomingSkills, ...existingSkills].forEach((skill, index) => {
+    const normalized = normalizeSkillRecord(skill, index);
+    const identity = buildSkillIdentity(normalized);
+    if (!identity || seen.has(identity)) return;
+    seen.add(identity);
+    merged.push(normalized);
+  });
+  return merged;
+}
+
+function indexCatalogSkills(skills = []) {
+  const byId = new Map();
+  const byName = new Map();
+  const byNpmName = new Map();
+  skills.forEach((skill, index) => {
+    const normalized = normalizeSkillRecord(skill, index);
+    if (normalized.id) byId.set(String(normalized.id).toLowerCase(), normalized);
+    if (normalized.name) byName.set(String(normalized.name).toLowerCase(), normalized);
+    if (normalized.npmName) byNpmName.set(String(normalized.npmName).toLowerCase(), normalized);
+  });
+  return { byId, byName, byNpmName };
+}
+
+function mergeRecommendedSkillsWithCatalog(recommended = [], catalogSkills = []) {
+  const indexes = indexCatalogSkills(catalogSkills);
+  return (Array.isArray(recommended) ? recommended : [])
+    .map((item, index) => {
+      const hintedInstallMethod = resolveSkillInstallMethod(item);
+      const hintedNpmName = resolveSkillNpmName(item, hintedInstallMethod);
+      const canonical = indexes.byId.get(String(item?.id || '').toLowerCase())
+        || indexes.byNpmName.get(String(hintedNpmName || '').toLowerCase())
+        || indexes.byName.get(String(item?.name || '').toLowerCase())
+        || null;
+      const base = canonical || normalizeSkillRecord(item, index);
+      return {
+        ...base,
+        recommendationReason: String(
+          item?.recommendationReason
+          || item?.reason
+          || item?.why
+          || ''
+        ).trim(),
+        matchedProjectEvidence: Array.isArray(item?.matchedProjectEvidence)
+          ? item.matchedProjectEvidence.filter(Boolean).map((entry) => String(entry).trim())
+          : [],
+        confidence: ['high', 'medium', 'low'].includes(String(item?.confidence || '').toLowerCase())
+          ? String(item.confidence).toLowerCase()
+          : 'medium',
+      };
+    })
+    .filter((skill) => skill.name);
+}
+
+function buildSkillsRecommendationPrompt({
+  projectName = '',
+  requirementDesc = '',
+  techStack = [],
+  extraNotes = '',
+  intentDecomposition = '',
+  executionPlan = '',
+  taskOrchestration = '',
+  skillsCatalogPath = '',
+}) {
+  return `你是一名 Skill 推荐分析助手。你当前所在目录就是目标项目根目录，必须先分析仓库，再给出结论。
+
+## 必做事项
+1. 先阅读并分析当前项目代码结构、技术栈、已有实现方式与目录分布。
+2. 再阅读本次任务的三个拆分产物，尤其关注「执行计划」和「任务编排」。
+3. 再读取本地 Skills 清单文件：\`${skillsCatalogPath}\`
+4. 只从这份本地 Skills 清单中挑选“真正需要”的 Skill，宁缺毋滥。
+5. 如果某类能力项目现有能力已足够，或与本次执行无直接关系，不要推荐。
+
+## 输出要求
+- 只输出严格 JSON，不要输出 Markdown、解释、代码块。
+- skills 最多返回 8 个，按相关性从高到低排序。
+- 每个 skill 必须保留清单里的安装方式；若清单里没有，就保留为空字符串。
+- 如果你判断当前任务不需要任何 Skill，skills 返回空数组，并在 summary 中说明原因。
+
+输出 JSON 结构：
+{
+  "summary": "一句到三句的推荐摘要",
+  "skills": [
+    {
+      "id": "skill id",
+      "name": "Skill 名称",
+      "description": "Skill 描述",
+      "installMethod": "安装方式",
+      "npmName": "npm 包名，没有则空字符串",
+      "recommendationReason": "为什么当前项目真正需要它",
+      "matchedProjectEvidence": ["项目中的依据 1", "执行计划中的依据 2"],
+      "confidence": "high|medium|low"
+    }
+  ]
+}
+
+## 项目基础信息
+- 项目名称: ${projectName || '未提供'}
+- 技术栈: ${Array.isArray(techStack) && techStack.length ? techStack.join(', ') : '未提供'}
+
+## 原始需求
+${requirementDesc || '未提供'}
+
+## 补充说明
+${extraNotes || '无'}
+
+## 意图拆解
+${intentDecomposition || '无'}
+
+## 执行计划
+${executionPlan || '无'}
+
+## 任务编排
+${taskOrchestration || '无'}`;
 }
 
 function buildSkillContextTokens(payload = {}) {
@@ -1277,6 +1499,141 @@ app.post('/api/recommended-skills', async (req, res) => {
       skills: [],
     });
   }
+});
+
+app.post('/api/skills/catalog/sync', async (req, res) => {
+  try {
+    const existingCache = readSkillsCatalogCache();
+    const remoteSkills = (await fetchSkillsCatalog())
+      .map((skill, index) => normalizeSkillRecord(skill, index))
+      .filter((skill) => skill.name);
+
+    const remoteHeadFingerprint = remoteSkills.length ? buildSkillFingerprint(remoteSkills[0]) : '';
+    const localHeadFingerprint = existingCache?.skills?.length ? buildSkillFingerprint(existingCache.skills[0]) : '';
+    const unchanged = Boolean(remoteHeadFingerprint && localHeadFingerprint && remoteHeadFingerprint === localHeadFingerprint);
+
+    if (unchanged) {
+      return res.json({
+        ok: true,
+        updated: false,
+        skipped: true,
+        sourceUrl: SKILLS_SOURCE_URL,
+        filePath: SKILLS_CACHE_FILE,
+        totalRemote: remoteSkills.length,
+        totalLocal: existingCache.skills.length,
+        updatedAt: existingCache.updatedAt || '',
+        skills: existingCache.skills,
+      });
+    }
+
+    const mergedSkills = mergeSkillsCatalog(existingCache?.skills || [], remoteSkills);
+    const now = new Date().toISOString();
+    const payload = {
+      version: 1,
+      updatedAt: now,
+      sourceUrl: SKILLS_SOURCE_URL,
+      total: mergedSkills.length,
+      skills: mergedSkills,
+    };
+    writeSkillsCatalogCache(payload);
+
+    res.json({
+      ok: true,
+      updated: true,
+      skipped: false,
+      sourceUrl: SKILLS_SOURCE_URL,
+      filePath: SKILLS_CACHE_FILE,
+      totalRemote: remoteSkills.length,
+      totalLocal: mergedSkills.length,
+      updatedAt: now,
+      skills: mergedSkills,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message || '同步 Skills 列表失败',
+      skills: [],
+    });
+  }
+});
+
+app.post('/api/skills/recommendations/analyze', (req, res) => {
+  const {
+    engine,
+    projectPath,
+    projectName,
+    requirementDesc,
+    techStack,
+    extraNotes,
+    intentDecomposition,
+    executionPlan,
+    taskOrchestration,
+  } = req.body || {};
+
+  if (!engine || !projectPath) {
+    return res.status(400).json({ error: 'Missing required fields: engine, projectPath' });
+  }
+
+  const cache = readSkillsCatalogCache();
+  if (!cache || !Array.isArray(cache.skills) || cache.skills.length === 0) {
+    return res.status(400).json({ error: '本地 Skills 清单不存在，请先点击“获取 Skills 列表”' });
+  }
+
+  const prompt = buildSkillsRecommendationPrompt({
+    projectName,
+    requirementDesc,
+    techStack,
+    extraNotes,
+    intentDecomposition,
+    executionPlan,
+    taskOrchestration,
+    skillsCatalogPath: SKILLS_CACHE_FILE,
+  });
+
+  let command;
+  let args;
+  if (engine === 'claude') {
+    command = 'claude';
+    args = ['-p', prompt, '--output-format', 'text'];
+  } else if (engine === 'cursor') {
+    command = CURSOR_AGENT_BIN;
+    args = ['-p', '--output-format', 'text', '--force', prompt];
+  } else {
+    return res.status(400).json({ error: `不支持的引擎: ${engine}` });
+  }
+
+  runCLI(
+    command,
+    args,
+    null,
+    null,
+    ({ code, stdout, stderr }) => {
+      if (code !== 0) {
+        res.status(500).json(formatCliError(code, stderr, engine));
+        return;
+      }
+
+      try {
+        const jsonMatch = stdout.match(/```json\s*([\s\S]*?)```/) || stdout.match(/(\{[\s\S]*"skills"[\s\S]*\})/);
+        const parsed = JSON.parse(jsonMatch ? jsonMatch[1] : stdout.trim());
+        const skills = mergeRecommendedSkillsWithCatalog(parsed?.skills || [], cache.skills).slice(0, 8);
+        res.json({
+          ok: true,
+          summary: String(parsed?.summary || '').trim(),
+          sourceFile: SKILLS_CACHE_FILE,
+          catalogUpdatedAt: cache.updatedAt || '',
+          totalCatalogSkills: cache.skills.length,
+          skills,
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: '无法解析 Skills 推荐结果 JSON',
+          detail: String(stdout || '').slice(0, 4000),
+        });
+      }
+    },
+    { cwd: projectPath }
+  );
 });
 
 const NPM_PACKAGE_SAFE = /^(@[a-zA-Z0-9][a-zA-Z0-9._-]*\/)?[a-zA-Z0-9][a-zA-Z0-9._-]*$/;

@@ -2,16 +2,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAppContext } from '../context/AppContext';
 import { parseTaskOrchestrationDraft } from '../domains/pipeline/draftParsers';
 import {
+  analyzeRecommendedSkills,
   aiExecuteTask,
   createStepCheckpoint,
   ensureGitBranch,
   fetchGitBranches,
-  getRecommendedSkills,
   installSkillPackages,
   normalizeTaskOrchestration,
   rollbackToStepCheckpoint,
   savePromptResources,
+  syncSkillsCatalog,
 } from '../utils/aiService';
+import { persistJobState } from '../utils/jobApi';
 
 const PROMPT_RESOURCE_FILES = [
   { field: 'intentDecomposition', filename: '01-intent-decomposition.md' },
@@ -72,6 +74,12 @@ function skillRowId(skill, index) {
   return skill.id ?? skill.npmName ?? skill.name ?? `skill-${index}`;
 }
 
+function formatSkillInstallMethod(skill) {
+  if (skill.installMethod) return skill.installMethod;
+  if (skill.npmName) return `npm install ${skill.npmName}`;
+  return '无';
+}
+
 function formatSkillsBlock(skills) {
   if (!skills.length) {
     return '- 当前未命中可用 Skill，可按默认工程规范执行。';
@@ -79,13 +87,20 @@ function formatSkillsBlock(skills) {
 
   return skills.map((skill, index) => {
     const tags = Array.isArray(skill.tags) && skill.tags.length ? `标签: ${skill.tags.join(', ')}` : '标签: 无';
-    const matched = Array.isArray(skill.matchedTokens) && skill.matchedTokens.length
-      ? `命中线索: ${skill.matchedTokens.join(', ')}`
-      : '命中线索: 自动推荐';
+    const matched = Array.isArray(skill.matchedProjectEvidence) && skill.matchedProjectEvidence.length
+      ? `项目依据: ${skill.matchedProjectEvidence.join('；')}`
+      : Array.isArray(skill.matchedTokens) && skill.matchedTokens.length
+        ? `命中线索: ${skill.matchedTokens.join(', ')}`
+        : '项目依据: Agent 综合判断';
+    const reason = skill.recommendationReason
+      ? `
+   - 推荐原因: ${skill.recommendationReason}`
+      : '';
     return `${index + 1}. 名称: ${skill.name}
    - 描述: ${skill.description || '无描述'}
+   - 安装方式: ${formatSkillInstallMethod(skill)}
    - ${tags}
-   - ${matched}${skill.npmName ? `
+   - ${matched}${reason}${skill.npmName ? `
    - npm 包名: ${skill.npmName}` : `
    - npm: 无（仅作规范参考）`}`;
   }).join('\n');
@@ -99,6 +114,7 @@ function createStepRuntime() {
     lastRunAt: '',
     lastCompletedAt: '',
     lastError: '',
+    lastOutput: '',
   };
 }
 
@@ -185,7 +201,7 @@ function buildScopedExecutionPrompt(step, index, allSteps, skillsBlock) {
 2. \`.taskforge-prompts/02-execution-plan.md\`
 3. \`.taskforge-prompts/03-task-orchestration.md\`
 
-在正式执行前，请充分理解下方「候选 Skills」中每一项的名称与描述；结合三份 md 判断哪些 Skill 与本次任务真正相关，仅对适用项严格遵循其规范（不适用的不要假装已采用）。
+在正式执行前，请充分理解下方「候选 Skills」中每一项的名称与描述；这些候选项来自人工触发的 Skills 同步与分析流程。结合三份 md 判断哪些 Skill 与本次任务真正相关，仅对适用项严格遵循其规范（不适用的不要假装已采用）。
 
 候选 Skills（名称与描述；请据此挑选适用子集）：
 ${skillsBlock}
@@ -224,14 +240,24 @@ ${orderedList}
 }
 
 export default function Step5Prompts() {
-  const { state, copyToClipboard, showToast } = useAppContext();
+  const { state, dispatch, copyToClipboard, showToast } = useAppContext();
   const [selectedEngine, setSelectedEngine] = useState(state.aiEngine || '');
+  const [skillsCatalogMeta, setSkillsCatalogMeta] = useState({
+    loaded: false,
+    total: 0,
+    updatedAt: '',
+    filePath: '',
+    skipped: false,
+  });
+  const [skillsCatalogLoading, setSkillsCatalogLoading] = useState(false);
+  const [skillsAnalyzing, setSkillsAnalyzing] = useState(false);
+  const [skillsAnalysisDone, setSkillsAnalysisDone] = useState(false);
+  const [skillsAnalysisSummary, setSkillsAnalysisSummary] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState('');
   const [terminalStatus, setTerminalStatus] = useState('');
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [recommendedSkills, setRecommendedSkills] = useState([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
   /** skillRowId -> 是否纳入 Prompt（默认全选；npm 安装仅通过「一键安装全部 Skill」） */
   const [skillInstallSelected, setSkillInstallSelected] = useState({});
   /** skillRowId -> 正在执行一键安装中（逐包） */
@@ -254,6 +280,10 @@ export default function Step5Prompts() {
   const stopRequestedRef = useRef(false);
   const currentStepIdRef = useRef('');
   const terminalBodyRef = useRef(null);
+  const restoredPromptStateKeyRef = useRef('');
+  const persistedPromptStateJsonRef = useRef('');
+
+  const persistedPromptState = state.optimizations?.promptExecution || {};
 
   const terminalPieces = useMemo(
     () => splitTerminalMcpMarkers(terminalOutput || '等待执行输出...'),
@@ -309,6 +339,34 @@ export default function Step5Prompts() {
       terminalBodyRef.current.scrollTop = terminalBodyRef.current.scrollHeight;
     }
   }, [terminalOutput, terminalStatus, terminalPieces]);
+
+  useEffect(() => {
+    const persistedKey = JSON.stringify(persistedPromptState || {});
+    if (persistedKey === restoredPromptStateKeyRef.current) return;
+    restoredPromptStateKeyRef.current = persistedKey;
+    setSelectedEngine(persistedPromptState.selectedEngine || state.aiEngine || '');
+    setSkillsCatalogMeta(persistedPromptState.skillsCatalogMeta || {
+      loaded: false,
+      total: 0,
+      updatedAt: '',
+      filePath: '',
+      skipped: false,
+    });
+    setSkillsAnalysisDone(Boolean(persistedPromptState.skillsAnalysisDone));
+    setSkillsAnalysisSummary(persistedPromptState.skillsAnalysisSummary || '');
+    setTerminalOutput(persistedPromptState.terminalOutput || '');
+    setTerminalStatus(persistedPromptState.terminalStatus || '');
+    setTerminalVisible(Boolean(persistedPromptState.terminalVisible));
+    setRecommendedSkills(Array.isArray(persistedPromptState.recommendedSkills) ? persistedPromptState.recommendedSkills : []);
+    setSkillInstallSelected(persistedPromptState.skillInstallSelected || {});
+    setExecutionMode(persistedPromptState.executionMode || 'full');
+    setStepRuntimeMap(persistedPromptState.stepRuntimeMap || {});
+    setSelectedStepIds(Array.isArray(persistedPromptState.selectedStepIds) ? persistedPromptState.selectedStepIds : []);
+    setNormalizedSteps(Array.isArray(persistedPromptState.normalizedSteps) ? persistedPromptState.normalizedSteps : []);
+    setExecBranchCurrent(persistedPromptState.execBranchCurrent || '');
+    setSelectedExecBranch(persistedPromptState.selectedExecBranch || '');
+    setGitBranchState(persistedPromptState.gitBranchState || { ok: true, loading: false, error: '' });
+  }, [persistedPromptState, state.aiEngine]);
 
   useEffect(() => {
     const projectPath = state.projectPath?.trim();
@@ -388,57 +446,76 @@ export default function Step5Prompts() {
   }, [fallbackTaskGraph.tasks]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadSkills = async () => {
-      setSkillsLoading(true);
-      try {
-        const result = await getRecommendedSkills({
-          projectName: state.projectName,
-          projectPath: state.projectPath,
-          requirementDesc: state.requirementDesc,
-          techStack: state.techStack,
-          extraNotes: state.extraNotes,
-          projectFiles: state.projectFiles,
-          intentDecomposition: state.splitDrafts?.intentDecomposition || '',
-          executionPlan: state.splitDrafts?.executionPlan || '',
-          taskOrchestration: state.splitDrafts?.taskOrchestration || '',
-        });
-        if (!cancelled) {
-          setRecommendedSkills(result.skills || []);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setRecommendedSkills([]);
-          console.warn('[Step5Prompts] 获取推荐 Skills 失败', error);
-        }
-      } finally {
-        if (!cancelled) {
-          setSkillsLoading(false);
-        }
-      }
-    };
-
-    loadSkills();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    state.projectName,
-    state.projectPath,
-    state.requirementDesc,
-    state.techStack,
-    state.extraNotes,
-    state.projectFiles,
-    state.splitDrafts,
-  ]);
-
-  useEffect(() => {
     const next = {};
     recommendedSkills.forEach((s, i) => {
       next[skillRowId(s, i)] = true;
     });
     setSkillInstallSelected(next);
   }, [recommendedSkills]);
+
+  const promptExecutionSnapshot = useMemo(() => ({
+    selectedEngine,
+    skillsCatalogMeta,
+    skillsAnalysisDone,
+    skillsAnalysisSummary,
+    terminalOutput,
+    terminalStatus,
+    terminalVisible,
+    recommendedSkills,
+    skillInstallSelected,
+    executionMode,
+    stepRuntimeMap,
+    selectedStepIds,
+    normalizedSteps,
+    execBranchCurrent,
+    selectedExecBranch,
+    gitBranchState: gitBranchState?.ok === false && gitBranchState?.loading
+      ? { ok: false, loading: false, error: gitBranchState.error || '' }
+      : gitBranchState,
+  }), [
+    execBranchCurrent,
+    executionMode,
+    gitBranchState,
+    normalizedSteps,
+    recommendedSkills,
+    selectedEngine,
+    selectedExecBranch,
+    selectedStepIds,
+    skillInstallSelected,
+    skillsAnalysisDone,
+    skillsAnalysisSummary,
+    skillsCatalogMeta,
+    stepRuntimeMap,
+    terminalOutput,
+    terminalStatus,
+    terminalVisible,
+  ]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const nextJson = JSON.stringify(promptExecutionSnapshot);
+      if (nextJson === persistedPromptStateJsonRef.current) return;
+      persistedPromptStateJsonRef.current = nextJson;
+      dispatch({
+        type: 'MERGE_OPTIMIZATIONS',
+        value: {
+          promptExecution: promptExecutionSnapshot,
+        },
+      });
+      if (!state.currentJobId) return;
+      persistJobState(state.currentJobId, state, {
+        optimizations: {
+          ...(state.optimizations || {}),
+          promptExecution: promptExecutionSnapshot,
+        },
+      }).catch(() => {});
+    }, 500);
+    return () => clearTimeout(t);
+  }, [
+    dispatch,
+    promptExecutionSnapshot,
+    state,
+  ]);
 
   const skillsForPrompt = useMemo(
     () => recommendedSkills.filter((s, i) => skillInstallSelected[skillRowId(s, i)] !== false),
@@ -471,10 +548,10 @@ export default function Step5Prompts() {
 2. \`.taskforge-prompts/02-execution-plan.md\`
 3. \`.taskforge-prompts/03-task-orchestration.md\`
 
-在正式执行前，请充分理解下方「候选 Skills」中每一项的名称与描述；结合三份 md 判断哪些 Skill 与本次任务真正相关，仅对适用项严格遵循其规范（不适用的不要假装已采用）。
+在正式执行前，请充分理解下方「候选 Skills」中每一项的名称与描述；这些候选项来自人工触发的 Skills 同步与分析流程。结合三份 md 判断哪些 Skill 与本次任务真正相关，仅对适用项严格遵循其规范（不适用的不要假装已采用）。
 
 Skill 使用方式：
-- 下方为系统根据项目上下文推荐的候选集；勾选仅决定某项是否写入本轮 Prompt，npm 包需在执行前通过「一键安装全部 Skill」单独安装。
+- 下方为人工触发 Skills 同步后，再由 Agent 结合项目上下文分析得到的候选集；勾选仅决定某项是否写入本轮 Prompt，npm 包需在执行前通过「一键安装全部 Skill」单独安装。
 - 你必须根据各 Skill 的名称与描述自行筛选适用子集，并优先查阅已安装包内的说明（如 SKILL.md）以吸收具体约定。
 - 对判定为不适用的 Skill，不要在输出中引用或声称已遵循。
 
@@ -517,6 +594,86 @@ ${skillsBlock}
       content: state.splitDrafts?.[field] || '',
     }))
   ), [state.splitDrafts]);
+
+  const handleSyncSkillsCatalog = useCallback(async () => {
+    setSkillsCatalogLoading(true);
+    try {
+      const result = await syncSkillsCatalog();
+      setSkillsCatalogMeta({
+        loaded: true,
+        total: result.totalLocal || 0,
+        updatedAt: result.updatedAt || '',
+        filePath: result.filePath || '',
+        skipped: Boolean(result.skipped),
+      });
+      setRecommendedSkills([]);
+      setSkillsAnalysisDone(false);
+      setSkillsAnalysisSummary('');
+      showToast(result.skipped ? '✅ Skills 列表未变化，已沿用本地缓存' : '✅ Skills 列表已更新到本地文件');
+    } catch (error) {
+      showToast(error.message || '❌ 同步 Skills 列表失败');
+    } finally {
+      setSkillsCatalogLoading(false);
+    }
+  }, [showToast]);
+
+  const handleAnalyzeSkills = useCallback(async () => {
+    if (!selectedEngine) {
+      showToast('⚠️ 请先选择执行引擎');
+      return;
+    }
+    if (!state.projectPath?.trim()) {
+      showToast('⚠️ 请先在第一步配置项目路径');
+      return;
+    }
+    if (promptResources.every((item) => !item.content.trim())) {
+      showToast('⚠️ 请先完成前面的智能拆分，生成三个产物');
+      return;
+    }
+
+    setSkillsAnalyzing(true);
+    try {
+      const result = await analyzeRecommendedSkills({
+        engine: selectedEngine,
+        projectPath: state.projectPath,
+        projectName: state.projectName,
+        requirementDesc: state.requirementDesc,
+        techStack: state.techStack,
+        extraNotes: state.extraNotes,
+        intentDecomposition: state.splitDrafts?.intentDecomposition || '',
+        executionPlan: state.splitDrafts?.executionPlan || '',
+        taskOrchestration: state.splitDrafts?.taskOrchestration || '',
+      });
+      setRecommendedSkills(result.skills || []);
+      setSkillsAnalysisDone(true);
+      setSkillsAnalysisSummary(result.summary || '');
+      setSkillsCatalogMeta((prev) => ({
+        ...prev,
+        loaded: true,
+        total: result.totalCatalogSkills || prev.total,
+        updatedAt: result.catalogUpdatedAt || prev.updatedAt,
+        filePath: result.sourceFile || prev.filePath,
+      }));
+      showToast(`✅ Agent 已完成 Skills 分析${(result.skills || []).length ? '' : '（当前无需额外 Skill）'}`);
+    } catch (error) {
+      setRecommendedSkills([]);
+      setSkillsAnalysisDone(false);
+      setSkillsAnalysisSummary('');
+      showToast(error.message || '❌ 分析推荐 Skills 失败');
+    } finally {
+      setSkillsAnalyzing(false);
+    }
+  }, [
+    promptResources,
+    selectedEngine,
+    showToast,
+    state.extraNotes,
+    state.projectName,
+    state.projectPath,
+    state.requirementDesc,
+    state.splitDrafts,
+    state.techStack,
+  ]);
 
   const appendTerminal = useCallback((text) => {
     if (!text) return;
@@ -1080,6 +1237,7 @@ ${skillsBlock}
           updateStepRuntime(step.id, (current) => ({
             ...current,
             status: 'interrupted',
+            lastOutput: runResult.output || current.lastOutput || '',
           }));
           setIsExecuting(false);
           setTerminalStatus('执行已停止');
@@ -1091,6 +1249,7 @@ ${skillsBlock}
           ...current,
           status: 'completed',
           lastCompletedAt: new Date().toISOString(),
+          lastOutput: runResult.output || current.lastOutput || '',
         }));
         appendTerminal(`[taskforge] 步骤完成: ${step.title}\n`);
       }
@@ -1107,6 +1266,7 @@ ${skillsBlock}
           ...current,
           status: 'failed',
           lastError: error.message || '执行失败',
+          lastOutput: '',
         }));
       }
       setIsExecuting(false);
@@ -1174,11 +1334,13 @@ ${skillsBlock}
   /** 仅在实际任务执行（立即/分步 CLI）进行中锁定，与「停止执行」一致 */
   const branchSwitchLocked = isExecuting;
   const gitReadyForRun = Boolean(state.projectPath?.trim()) && gitBranchState.ok && !gitBranchState.loading;
-  const canExecute = Boolean(selectedEngine) && !isExecuting && gitReadyForRun;
-  const canOpenStepwise = !skillsLoading && !isExecuting && !isNormalizingSteps;
+  const skillsBusy = skillsCatalogLoading || skillsAnalyzing;
+  const canExecute = Boolean(selectedEngine) && !isExecuting && gitReadyForRun && !skillsBusy;
+  const canOpenStepwise = !skillsBusy && !isExecuting && !isNormalizingSteps;
+  const canAnalyzeSkills = Boolean(selectedEngine) && Boolean(state.projectPath?.trim()) && !skillsBusy && !isExecuting && !isNormalizingSteps;
   const canInstallAllSkills = Boolean(state.projectPath)
     && installableSkillPackagesPlan.orderedPackages.length > 0
-    && !skillsLoading
+    && !skillsBusy
     && !isBulkInstallingSkills
     && !isExecuting
     && !isNormalizingSteps;
@@ -1197,9 +1359,62 @@ ${skillsBlock}
 
         <div className="ai-log-panel" style={{ marginBottom: 16 }}>
           <div className="ai-log-header">
-            <span>🧩 推荐 Skills {skillsLoading ? '· 加载中...' : `· ${recommendedSkills.length} 个`}</span>
+            <span>🧩 Skills 清单与推荐 {skillsBusy ? '· 处理中...' : recommendedSkills.length ? `· 已推荐 ${recommendedSkills.length} 个` : ''}</span>
           </div>
           <div className="ai-log-body" style={{ whiteSpace: 'normal' }}>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleSyncSkillsCatalog}
+                disabled={skillsBusy || isExecuting || isNormalizingSteps}
+                style={{ opacity: skillsBusy || isExecuting || isNormalizingSteps ? 0.55 : 1 }}
+              >
+                {skillsCatalogLoading ? '⏳ 获取中…' : '⬇️ 获取 / 更新 Skills 列表'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleAnalyzeSkills}
+                disabled={!canAnalyzeSkills}
+                style={{ opacity: canAnalyzeSkills ? 1 : 0.55 }}
+              >
+                {skillsAnalyzing ? '🤖 分析中…' : '🤖 分析推荐 Skills'}
+              </button>
+            </div>
+
+            <div style={{ fontSize: '0.92em', opacity: 0.82, marginBottom: 12 }}>
+              <div>第 1 步：点击“获取 / 更新 Skills 列表”，服务端会请求 Skills 接口，并把 `name`、`description`、`installMethod` 等信息写入本地缓存文件。</div>
+              <div>第 2 步：点击“分析推荐 Skills”，系统会调用 Agent 分析项目代码和前三步产物，再只推荐真正需要的 Skills。</div>
+            </div>
+
+            {skillsCatalogMeta.loaded ? (
+              <div
+                style={{
+                  marginBottom: 12,
+                  padding: '10px 12px',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  background: 'var(--panel-muted, rgba(0, 0, 0, 0.04))',
+                }}
+              >
+                <div><strong>本地 Skills 缓存：</strong>{skillsCatalogMeta.total} 个</div>
+                {skillsCatalogMeta.updatedAt ? <div>更新时间：{formatTimeLabel(skillsCatalogMeta.updatedAt) || skillsCatalogMeta.updatedAt}</div> : null}
+                {skillsCatalogMeta.filePath ? <div style={{ wordBreak: 'break-all' }}>缓存文件：<code>{skillsCatalogMeta.filePath}</code></div> : null}
+                <div>{skillsCatalogMeta.skipped ? '本次检测到首条记录未变化，已沿用本地缓存。' : '本次已刷新本地 Skills 缓存。'}</div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 12, opacity: 0.78 }}>
+                当前还没有读取 Skills 本地缓存。执行不会自动联网查找 Skills。
+              </div>
+            )}
+
+            {skillsAnalysisSummary ? (
+              <div style={{ marginBottom: 12 }}>
+                <strong>分析摘要：</strong>{skillsAnalysisSummary}
+              </div>
+            ) : null}
+
             {recommendedSkills.length > 0 ? recommendedSkills.map((skill, index) => {
               const rowId = skillRowId(skill, index);
               const rowLoading = Boolean(skillRowInstallLoading[rowId]);
@@ -1245,10 +1460,23 @@ ${skillsBlock}
                       </span>
                     )}
                     <div style={{ marginTop: 4 }}>{skill.description || '无描述'}</div>
+                    <div style={{ marginTop: 4, fontSize: '0.9em', opacity: 0.82 }}>
+                      安装方式：<code>{formatSkillInstallMethod(skill)}</code>
+                    </div>
+                    {skill.recommendationReason ? (
+                      <div style={{ marginTop: 4, fontSize: '0.9em' }}>
+                        推荐原因：{skill.recommendationReason}
+                      </div>
+                    ) : null}
+                    {Array.isArray(skill.matchedProjectEvidence) && skill.matchedProjectEvidence.length ? (
+                      <div style={{ marginTop: 4, fontSize: '0.88em', opacity: 0.8 }}>
+                        项目依据：{skill.matchedProjectEvidence.join('；')}
+                      </div>
+                    ) : null}
                   </span>
                 </label>
               );
-            }) : '当前未命中推荐 Skill，将按默认 Prompt 执行。'}
+            }) : skillsAnalysisDone ? 'Agent 已分析完成，当前任务无需额外 Skill，将按默认 Prompt 执行。' : '当前尚未生成推荐 Skill，请先手动获取 Skills 列表，再点击“分析推荐 Skills”。'}
           </div>
           {recommendedSkills.length > 0 && (
             <div
@@ -1270,7 +1498,7 @@ ${skillsBlock}
               >
                 {isBulkInstallingSkills ? '⏳ 正在安装…' : '📦 一键安装全部 Skill'}
               </button>
-              {installableSkillPackagesPlan.orderedPackages.length === 0 && !skillsLoading ? (
+              {installableSkillPackagesPlan.orderedPackages.length === 0 && !skillsBusy ? (
                 <span style={{ fontSize: '0.9em', opacity: 0.75 }}>
                   当前列表无 npm 包名，无需安装
                 </span>
@@ -1310,8 +1538,8 @@ ${skillsBlock}
           <button
             className="btn btn-primary btn-lg"
             onClick={handleExecute}
-            disabled={!canExecute || skillsLoading}
-            style={{ opacity: canExecute && !skillsLoading ? 1 : 0.55 }}
+            disabled={!canExecute}
+            style={{ opacity: canExecute ? 1 : 0.55 }}
           >
             ▶ 立即执行
           </button>

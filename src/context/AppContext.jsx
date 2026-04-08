@@ -422,6 +422,15 @@ function reducer(state, action) {
     case 'SET_STRATEGY':
       return { ...state, splitStrategy: action.strategy === 'page' ? 'feature' : action.strategy };
 
+    case 'MERGE_OPTIMIZATIONS':
+      return {
+        ...state,
+        optimizations: {
+          ...(state.optimizations || {}),
+          ...(action.value || {}),
+        },
+      };
+
     // Step
     case 'SET_STEP':
       return { ...state, currentStep: action.step };

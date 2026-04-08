@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
 import Header from '../components/Header';
@@ -17,6 +17,11 @@ function WizardInner() {
   const { jobId } = useParams();
   const navigate = useNavigate();
   const [booting, setBooting] = useState(() => Boolean(jobId && jobId !== 'new'));
+  const latestPersistableRef = useRef(null);
+
+  useEffect(() => {
+    latestPersistableRef.current = buildPersistableState(state);
+  }, [state]);
 
   useEffect(() => {
     if (!jobId || jobId === 'new') {
@@ -66,6 +71,24 @@ function WizardInner() {
 
     return () => clearTimeout(t);
   }, [state, booting, jobId, state.currentJobId, showToast]);
+
+  useEffect(() => {
+    if (booting || !state.currentJobId) return undefined;
+    if (!jobId || jobId === 'new') return undefined;
+    if (state.currentJobId !== jobId) return undefined;
+
+    const flushLatestState = () => {
+      const payload = latestPersistableRef.current;
+      if (!payload) return;
+      updateJob(state.currentJobId, payload, { keepalive: true }).catch(() => {});
+    };
+
+    window.addEventListener('beforeunload', flushLatestState);
+    return () => {
+      window.removeEventListener('beforeunload', flushLatestState);
+      flushLatestState();
+    };
+  }, [booting, jobId, state.currentJobId]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {

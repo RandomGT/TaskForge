@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAppContext } from '../context/AppContext';
+import { persistJobState } from '../utils/jobApi';
 
 const stepLabels = [
   '需求 & AI 配置',
@@ -9,10 +10,11 @@ const stepLabels = [
 ];
 
 export default function StepIndicator() {
-  const { state, dispatch } = useAppContext();
+  const { state, dispatch, showToast } = useAppContext();
   const currentStep = state.currentStep;
 
-  const handleStepClick = (stepNum) => {
+  const handleStepClick = async (stepNum) => {
+    if (stepNum === currentStep) return;
     if (stepNum > currentStep) {
       if (currentStep === 1) {
         if (!state.projectName.trim() || !state.requirementDesc.trim()) {
@@ -21,6 +23,13 @@ export default function StepIndicator() {
       }
     }
     dispatch({ type: 'SET_STEP', step: stepNum });
+    if (state.currentJobId) {
+      try {
+        await persistJobState(state.currentJobId, state, { currentStep: stepNum });
+      } catch {
+        showToast('⚠️ 阶段切换已更新，但立即保存失败');
+      }
+    }
   };
 
   return (

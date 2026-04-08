@@ -17,7 +17,8 @@ export async function checkHealth() {
 // Get available engines
 export async function getEngines() {
   try {
-    const res = await fetch(`${API_BASE}/engines`, { signal: AbortSignal.timeout(8000) });
+    // 后端会串行跑 claude/agent --version 与 agent status，整体可能 >15s，过短会误判为「未安装」
+    const res = await fetch(`${API_BASE}/engines`, { signal: AbortSignal.timeout(30000) });
     const data = await res.json();
     return data.engines || [];
   } catch {
@@ -162,12 +163,12 @@ export async function ensureGitBranch(projectPath, checkoutTarget, newBranchName
   return data;
 }
 
-export async function getRecommendedSkills(payload) {
-  const res = await fetch(`${API_BASE}/recommended-skills`, {
+export async function syncSkillsCatalog() {
+  const res = await fetch(`${API_BASE}/skills/catalog/sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!res.ok) {
@@ -176,7 +177,27 @@ export async function getRecommendedSkills(payload) {
       const body = await res.text();
       if (body) detail += ` - ${body}`;
     } catch {}
-    throw new Error(`获取推荐 Skills 失败: ${detail}`);
+    throw new Error(`同步 Skills 列表失败: ${detail}`);
+  }
+
+  return res.json();
+}
+
+export async function analyzeRecommendedSkills(payload) {
+  const res = await fetch(`${API_BASE}/skills/recommendations/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120000),
+  });
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.text();
+      if (body) detail += ` - ${body}`;
+    } catch {}
+    throw new Error(`分析推荐 Skills 失败: ${detail}`);
   }
 
   return res.json();

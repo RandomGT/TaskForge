@@ -2,6 +2,7 @@ import React, { useRef, useCallback, useState } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { getNextTaskId } from '../utils/taskSplitter';
 import { aiOrchestrateStage } from '../utils/aiService';
+import { persistJobState } from '../utils/jobApi';
 import { assignFigmaIdsToTasks } from '../utils/figmaPages';
 import { buildPromptPackagesForTasks } from '../domains/prompts/promptPackage';
 import { parseExecutionPlanDraft, parseIntentDraft, parseTaskOrchestrationDraft } from '../domains/pipeline/draftParsers';
@@ -38,7 +39,21 @@ export default function Step3TaskSplit() {
       splitDrafts: drafts,
       splitStarted: true,
     });
+    return {
+      intentGraph,
+      executionPlan,
+      taskGraph: { tasks: tasksWithFigma },
+      tasks: tasksWithFigma,
+      promptPackages,
+      splitDrafts: drafts,
+      splitStarted: true,
+    };
   }, [dispatch, state]);
+
+  const saveStageSnapshot = useCallback(async (overrides = {}) => {
+    if (!state.currentJobId) return;
+    await persistJobState(state.currentJobId, state, overrides);
+  }, [state, state.currentJobId]);
 
   const handleStopAI = () => {
     if (abortRef.current) {
@@ -55,7 +70,10 @@ export default function Step3TaskSplit() {
       [field]: value,
     };
     dispatch({ type: 'UPDATE_SPLIT_DRAFT', field, value });
-    syncDraftsToModels(nextDrafts);
+    const snapshot = syncDraftsToModels(nextDrafts);
+    saveStageSnapshot(snapshot).catch(() => {
+      showToast('⚠️ 拆分内容已更新，但立即保存失败');
+    });
   };
 
   const activeDraftField = {
@@ -147,6 +165,19 @@ export default function Step3TaskSplit() {
         taskOrchestration: '',
       },
     });
+    try {
+      await saveStageSnapshot({
+        currentStep: 3,
+        splitStarted: true,
+        splitDrafts: {
+          intentDecomposition: '',
+          executionPlan: '',
+          taskOrchestration: '',
+        },
+      });
+    } catch {
+      showToast('⚠️ 已开始新一轮拆分，但初始化保存失败');
+    }
     setShowLog(true);
     setActiveView('intents');
 
@@ -173,10 +204,17 @@ export default function Step3TaskSplit() {
         executionPlan: '',
         taskOrchestration: '',
       };
+      const intentGraph = parseIntentDraft(intentDecomposition);
       dispatch({ type: 'SET_SPLIT_DRAFTS', value: draftsAfterIntent });
       dispatch({
         type: 'SET_PIPELINE_DATA',
-        intentGraph: parseIntentDraft(intentDecomposition),
+        intentGraph,
+        splitDrafts: draftsAfterIntent,
+        splitStarted: true,
+      });
+      await saveStageSnapshot({
+        currentStep: 3,
+        intentGraph,
         splitDrafts: draftsAfterIntent,
         splitStarted: true,
       });
@@ -188,10 +226,17 @@ export default function Step3TaskSplit() {
         ...draftsAfterIntent,
         executionPlan,
       };
+      const parsedExecutionPlan = parseExecutionPlanDraft(executionPlan);
       dispatch({ type: 'SET_SPLIT_DRAFTS', value: draftsAfterPlan });
       dispatch({
         type: 'SET_PIPELINE_DATA',
-        executionPlan: parseExecutionPlanDraft(executionPlan),
+        executionPlan: parsedExecutionPlan,
+        splitDrafts: draftsAfterPlan,
+        splitStarted: true,
+      });
+      await saveStageSnapshot({
+        currentStep: 3,
+        executionPlan: parsedExecutionPlan,
         splitDrafts: draftsAfterPlan,
         splitStarted: true,
       });
@@ -203,7 +248,11 @@ export default function Step3TaskSplit() {
         ...draftsAfterPlan,
         taskOrchestration,
       };
-      syncDraftsToModels(finalDrafts);
+      const finalSnapshot = syncDraftsToModels(finalDrafts);
+      await saveStageSnapshot({
+        ...finalSnapshot,
+        currentStep: 3,
+      });
       setActiveView('intents');
       dispatch({ type: 'AI_DONE' });
       showToast('✅ 三阶段拆分完成');
@@ -211,7 +260,17 @@ export default function Step3TaskSplit() {
       dispatch({ type: 'AI_ERROR', message: err.message || String(err) });
       showToast('❌ 智能拆分失败');
     }
-  }, [dispatch, runStage, showToast, state, syncDraftsToModels]);
+  }, [dispatch, runStage, saveStageSnapshot, showToast, state, syncDraftsToModels]);
+
+  const jumpToStep = async (step) => {
+    dispatch({ type: 'SET_STEP', step });
+    if (!state.currentJobId) return;
+    try {
+      await saveStageSnapshot({ currentStep: step });
+    } catch {
+      showToast('⚠️ 当前阶段已切换，但立即保存失败');
+    }
+  };
 
   return (
     <div className="step-content active fade-in">
@@ -299,8 +358,8 @@ export default function Step3TaskSplit() {
       )}
 
       <div className="step-nav">
-        <button className="btn btn-secondary" onClick={() => dispatch({ type: 'SET_STEP', step: 2 })}>← 上一步</button>
-        <button className="btn btn-primary" onClick={() => dispatch({ type: 'SET_STEP', step: 4 })}>下一步: Prompt & 执行 →</button>
+        <button className="btn btn-secondary" onClick={() => jumpToStep(2)}>← 上一步</button>
+        <button className="btn btn-primary" onClick={() => jumpToStep(4)}>下一步: Prompt & 执行 →</button>
       </div>
     </div>
   );
