@@ -149,3 +149,41 @@ export function parseTaskOrchestrationDraft(taskText) {
     }, index)),
   });
 }
+
+function inferTestAiExecutable(category, text) {
+  const content = String(text || '');
+  if (/人工|手动|开发者自测|肉眼|真机|自行验证/i.test(content)) return false;
+  if (/playwright|cypress|vitest|jest|npm test|pnpm test|yarn test|自动化|脚本/i.test(content)) return true;
+  if (category === 'manual' || category === 'e2e') return false;
+  return true;
+}
+
+function buildTestsFromSection(sectionText, category, prefix) {
+  const lines = getBulletLines(sectionText).filter((line) => line && !/^无新增/.test(line));
+  return lines.map((line, index) => ({
+    id: `${prefix}-${index + 1}`,
+    title: line.slice(0, 36),
+    category,
+    objective: line,
+    scope: [],
+    dependencies: [],
+    files: [],
+    commands: [],
+    acceptanceCriteria: [line],
+    aiExecutable: inferTestAiExecutable(category, line),
+    executionHint: inferTestAiExecutable(category, line) ? '请结合仓库现有测试命令或自动化入口执行验证。' : '',
+    manualNotes: inferTestAiExecutable(category, line) ? '' : line,
+  }));
+}
+
+export function parseTaskOrchestrationTests(taskText) {
+  const unitSection = extractSection(taskText, '3\\.\\s*单元测试覆盖');
+  const integrationSection = extractSection(taskText, '4\\.\\s*集成测试覆盖');
+  const e2eSection = extractSection(taskText, '5\\.\\s*端到端验证');
+
+  return [
+    ...buildTestsFromSection(unitSection, 'unit', 'test-unit'),
+    ...buildTestsFromSection(integrationSection, 'integration', 'test-integration'),
+    ...buildTestsFromSection(e2eSection, 'e2e', 'test-e2e'),
+  ];
+}

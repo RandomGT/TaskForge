@@ -1051,7 +1051,7 @@ function buildNormalizeOrchestrationPrompt({
   executionPlan = '',
   taskOrchestration = '',
 }) {
-  return `你是一名研发任务编排整理助手。请把下面的“任务编排 Markdown”整理成标准 JSON 步骤结构，供前端做分步执行。
+  return `你是一名研发任务编排整理助手。请把下面的“任务编排 Markdown”整理成标准 JSON 步骤结构，供前端做分步执行与测试清单展示。
 
 你必须遵守：
 - 优先从“任务编排 Markdown”中提取步骤。
@@ -1060,6 +1060,11 @@ function buildNormalizeOrchestrationPrompt({
 - 如果某一步缺少任务 ID，则自动生成稳定 ID，格式用 "step-1"、"step-2"。
 - dependencies 字段只保留依赖任务 ID 数组；如果是“无”则输出空数组。
 - files、acceptanceCriteria、steps 都必须是数组，没有就输出空数组。
+- 除 tasks 外，还必须额外整理一份 tests 数组，至少覆盖：单测、集成测试、端到端验证、人工验证/开发者自测这几个层次；如果某一层不适用，也要明确给出原因。
+- tests 中每一项都必须判断 AI 是否可执行：
+  - 如果可通过命令、脚本、自动化流程完成，aiExecutable = true
+  - 如果只能靠人工点点看、肉眼验收、真机操作、外部环境协作，则 aiExecutable = false
+- 对 aiExecutable = true 的测试项，要把可执行的命令、脚本入口、验证目标写清楚，便于前端后续直接触发。
 
 输出格式：
 {
@@ -1072,6 +1077,22 @@ function buildNormalizeOrchestrationPrompt({
       "acceptanceCriteria": ["验收项1"],
       "files": ["src/App.jsx"],
       "steps": ["子步骤1"]
+    }
+  ],
+  "tests": [
+    {
+      "id": "test-unit-1",
+      "title": "补充组件单测",
+      "category": "unit|integration|e2e|manual",
+      "objective": "要验证什么",
+      "scope": ["关联任务 ID 或模块名"],
+      "dependencies": ["TASK-1"],
+      "files": ["src/components/Button.test.jsx"],
+      "commands": ["npm test -- Button"],
+      "acceptanceCriteria": ["测试应通过", "覆盖关键交互"],
+      "aiExecutable": true,
+      "executionHint": "执行命令并检查退出码与关键断言",
+      "manualNotes": ""
     }
   ]
 }

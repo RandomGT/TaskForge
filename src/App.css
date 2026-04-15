@@ -1798,6 +1798,17 @@ body {
   flex-wrap: wrap;
 }
 
+.stepwise-test-section {
+  margin-top: 18px;
+}
+
+.stepwise-test-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--orange);
+}
+
 @media (max-width: 1100px) {
   .stepwise-shell {
     grid-template-columns: 1fr;

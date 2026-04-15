@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppContext } from '../context/AppContext';
-import { parseTaskOrchestrationDraft } from '../domains/pipeline/draftParsers';
+import { parseTaskOrchestrationDraft, parseTaskOrchestrationTests } from '../domains/pipeline/draftParsers';
 import {
   analyzeRecommendedSkills,
   aiExecuteTask,
@@ -244,6 +244,94 @@ ${orderedList}
 - 完成后输出本步骤的改动摘要，并同步更新 \`.taskforge-prompts/03-task-orchestration.md\` 中当前步骤的状态。`;
 }
 
+function createTestRuntime() {
+  return {
+    status: 'never', // never | running | completed | interrupted | failed
+    runCount: 0,
+    lastRunAt: '',
+    lastCompletedAt: '',
+    lastError: '',
+    lastOutput: '',
+  };
+}
+
+function getTestCategoryLabel(category) {
+  switch (category) {
+    case 'unit':
+      return '单测';
+    case 'integration':
+      return '集测';
+    case 'e2e':
+      return '端到端';
+    case 'manual':
+      return '人工验证';
+    default:
+      return '测试';
+  }
+}
+
+function buildTestExecutionPrompt(test, allSteps) {
+  const relatedScope = Array.isArray(test.scope) && test.scope.length
+    ? test.scope.map((item) => `- ${item}`).join('\n')
+    : '- 未指定范围，请结合任务编排判断';
+  const dependencyText = Array.isArray(test.dependencies) && test.dependencies.length
+    ? test.dependencies.map((item) => `- ${item}`).join('\n')
+    : '- 无';
+  const commandText = Array.isArray(test.commands) && test.commands.length
+    ? test.commands.map((item) => `- ${item}`).join('\n')
+    : '- 未提供命令，请先定位仓库内已有测试入口并在范围内执行';
+  const filesText = Array.isArray(test.files) && test.files.length
+    ? test.files.map((item) => `- ${item}`).join('\n')
+    : '- 未指定文件';
+  const acceptanceText = Array.isArray(test.acceptanceCriteria) && test.acceptanceCriteria.length
+    ? test.acceptanceCriteria.map((item) => `- ${item}`).join('\n')
+    : '- 以本测试目标是否完成为准';
+  const orderedList = allSteps.map((item, itemIndex) => `${itemIndex + 1}. [${item.id}] ${item.title}`).join('\n');
+
+  return `你是一个负责验证研发结果的 AI Agent。
+
+开始执行前，必须先完整阅读并分析以下三个文件，它们是本次验证的唯一业务依据：
+1. \`.taskforge-prompts/01-intent-decomposition.md\`
+2. \`.taskforge-prompts/02-execution-plan.md\`
+3. \`.taskforge-prompts/03-task-orchestration.md\`
+
+本轮只允许执行下面这一项测试：
+- 测试 ID：${test.id}
+- 测试标题：${test.title}
+- 测试类型：${getTestCategoryLabel(test.category)}
+- 测试目标：${test.objective || '以命令与验收标准为准'}
+
+测试范围：
+${relatedScope}
+
+依赖任务：
+${dependencyText}
+
+推荐命令 / 执行入口：
+${commandText}
+
+关联文件：
+${filesText}
+
+验收标准：
+${acceptanceText}
+
+全量任务清单（仅用于定位上下文，不要执行未授权的实现改动）：
+${orderedList}
+
+执行规则：
+- 本轮重点是验证，不是继续扩写实现；除非为了修复明显的测试脚本或命令入口问题，否则不要擅自改业务代码。
+- 优先执行上方已有命令；如果命令不可用，再在同等范围内寻找最接近的仓库测试入口。
+- 若测试失败，要明确指出失败现象、命令输出摘要、可能关联的任务或文件。
+- 若测试通过，要说明执行了哪些命令、验证了哪些点。
+- 如果发现该测试事实上无法由 AI 完成，应立即停止并说明为何需要人工验证。
+
+输出要求：
+- 先给出简短验证计划。
+- 再执行测试。
+- 最后输出测试结果摘要，包含：执行命令、结果、失败点或通过依据。`;
+}
+
 export default function Step5Prompts() {
   const { state, dispatch, copyToClipboard, showToast } = useAppContext();
   const [selectedEngine, setSelectedEngine] = useState(state.aiEngine || '');
@@ -276,6 +364,8 @@ export default function Step5Prompts() {
   const [stepRuntimeMap, setStepRuntimeMap] = useState({});
   const [selectedStepIds, setSelectedStepIds] = useState([]);
   const [normalizedSteps, setNormalizedSteps] = useState([]);
+  const [normalizedTests, setNormalizedTests] = useState([]);
+  const [testRuntimeMap, setTestRuntimeMap] = useState({});
   const [isNormalizingSteps, setIsNormalizingSteps] = useState(false);
   /** 执行分支：来自 git branch -a */
   const [execBranchList, setExecBranchList] = useState([]);
@@ -304,6 +394,11 @@ export default function Step5Prompts() {
     [state.splitDrafts?.taskOrchestration],
   );
 
+  const fallbackTests = useMemo(
+    () => parseTaskOrchestrationTests(state.splitDrafts?.taskOrchestration || ''),
+    [state.splitDrafts?.taskOrchestration],
+  );
+
   const orchestrationSteps = useMemo(() => {
     const parsedTasks = fallbackTaskGraph.tasks || [];
     const sourceTasks = parsedTasks.length
@@ -320,6 +415,23 @@ export default function Step5Prompts() {
       steps: Array.isArray(task.steps) ? task.steps : [],
     }));
   }, [fallbackTaskGraph.tasks, normalizedSteps, state.tasks]);
+
+  const executableTests = useMemo(() => (
+    ((Array.isArray(normalizedTests) && normalizedTests.length ? normalizedTests : fallbackTests)).map((test, index) => ({
+      id: String(test.id ?? `test-${index + 1}`),
+      title: test.title || `测试 ${index + 1}`,
+      category: test.category || 'manual',
+      objective: test.objective || '',
+      scope: Array.isArray(test.scope) ? test.scope : [],
+      dependencies: Array.isArray(test.dependencies) ? test.dependencies : [],
+      files: Array.isArray(test.files) ? test.files : [],
+      commands: Array.isArray(test.commands) ? test.commands : [],
+      acceptanceCriteria: Array.isArray(test.acceptanceCriteria) ? test.acceptanceCriteria : [],
+      aiExecutable: Boolean(test.aiExecutable),
+      executionHint: test.executionHint || '',
+      manualNotes: test.manualNotes || '',
+    }))
+  ), [fallbackTests, normalizedTests]);
 
   const stepIndexMap = useMemo(() => {
     const map = new Map();
@@ -375,6 +487,8 @@ export default function Step5Prompts() {
     setStepRuntimeMap(persistedPromptState.stepRuntimeMap || {});
     setSelectedStepIds(Array.isArray(persistedPromptState.selectedStepIds) ? persistedPromptState.selectedStepIds : []);
     setNormalizedSteps(Array.isArray(persistedPromptState.normalizedSteps) ? persistedPromptState.normalizedSteps : []);
+    setNormalizedTests(Array.isArray(persistedPromptState.normalizedTests) ? persistedPromptState.normalizedTests : []);
+    setTestRuntimeMap(persistedPromptState.testRuntimeMap || {});
     setExecBranchCurrent(persistedPromptState.execBranchCurrent || '');
     setSelectedExecBranch(persistedPromptState.selectedExecBranch || '');
     setGitBranchState(persistedPromptState.gitBranchState || { ok: true, loading: false, error: '' });
@@ -489,6 +603,16 @@ export default function Step5Prompts() {
   }, [orchestrationSteps, stepIndexMap]);
 
   useEffect(() => {
+    setTestRuntimeMap((prev) => {
+      const next = {};
+      executableTests.forEach((test) => {
+        next[test.id] = prev[test.id] || createTestRuntime();
+      });
+      return next;
+    });
+  }, [executableTests]);
+
+  useEffect(() => {
     if ((fallbackTaskGraph.tasks || []).length > 0) {
       setNormalizedSteps([]);
     }
@@ -519,6 +643,8 @@ export default function Step5Prompts() {
     stepRuntimeMap,
     selectedStepIds,
     normalizedSteps,
+    normalizedTests,
+    testRuntimeMap,
     execBranchCurrent,
     selectedExecBranch,
     gitBranchState: gitBranchState?.ok === false && gitBranchState?.loading
@@ -531,11 +657,13 @@ export default function Step5Prompts() {
     executionMode,
     gitBranchState,
     normalizedSteps,
+    normalizedTests,
     recommendedSkills,
     selectedEngine,
     selectedCursorModel,
     selectedExecBranch,
     selectedStepIds,
+    testRuntimeMap,
     skillInstallSelected,
     skillsAnalysisDone,
     skillsAnalysisSummary,
@@ -985,6 +1113,19 @@ ${skillsBlock}
     });
   }, []);
 
+  const updateTestRuntime = useCallback((testId, updater) => {
+    setTestRuntimeMap((prev) => {
+      const current = prev[testId] || createTestRuntime();
+      const nextValue = typeof updater === 'function'
+        ? updater(current)
+        : { ...current, ...updater };
+      return {
+        ...prev,
+        [testId]: nextValue,
+      };
+    });
+  }, []);
+
   const resetStepStatesFrom = useCallback((startIndex, targetStatus = 'pending') => {
     setStepRuntimeMap((prev) => {
       const next = { ...prev };
@@ -1171,14 +1312,16 @@ ${skillsBlock}
         taskOrchestration: state.splitDrafts?.taskOrchestration || '',
       });
       const tasks = Array.isArray(result?.tasks) ? result.tasks : [];
-      if (!tasks.length) {
-        throw new Error('Agent 已返回结果，但没有生成可执行步骤');
+      const tests = Array.isArray(result?.tests) ? result.tests : [];
+      if (!tasks.length && !tests.length) {
+        throw new Error('Agent 已返回结果，但没有生成任务列表或测试清单');
       }
       setNormalizedSteps(tasks);
-      setTerminalOutput((prev) => `${prev}[taskforge] Agent 已生成 ${tasks.length} 个标准步骤，右侧列表已更新。\n`);
-      setTerminalStatus(`已规范化 ${tasks.length} 个步骤`);
-      showToast(`✅ 已生成 ${tasks.length} 个标准步骤`);
-      return tasks;
+      setNormalizedTests(tests);
+      setTerminalOutput((prev) => `${prev}[taskforge] Agent 已生成 ${tasks.length} 个任务、${tests.length} 个测试项，右侧列表已更新。\n`);
+      setTerminalStatus(`已生成 ${tasks.length} 个任务 / ${tests.length} 个测试项`);
+      showToast(`✅ 已生成 ${tasks.length} 个任务、${tests.length} 个测试项`);
+      return { tasks, tests };
     } finally {
       setIsNormalizingSteps(false);
     }
@@ -1190,26 +1333,26 @@ ${skillsBlock}
   ]);
 
   const openStepwisePanel = async () => {
-    let steps = orchestrationSteps;
-    if (steps.length === 0) {
-      try {
-        const generated = await normalizeStepsWithAgent();
-        steps = Array.isArray(generated) ? generated : [];
-      } catch (error) {
-        showToast(error.message || '❌ 规范化步骤失败');
-        setTerminalStatus('步骤规范化失败');
-        setTerminalOutput((prev) => `${prev}[taskforge] ${error.message}\n`);
-        return;
-      }
+    let steps = [];
+    let tests = [];
+    try {
+      const generated = await normalizeStepsWithAgent();
+      steps = Array.isArray(generated?.tasks) ? generated.tasks : [];
+      tests = Array.isArray(generated?.tests) ? generated.tests : [];
+    } catch (error) {
+      showToast(error.message || '❌ 规范化步骤失败');
+      setTerminalStatus('步骤规范化失败');
+      setTerminalOutput((prev) => `${prev}[taskforge] ${error.message}\n`);
+      return;
     }
-    if (steps.length === 0) {
-      showToast('⚠️ 当前任务编排中没有可执行的步骤');
+    if (steps.length === 0 && tests.length === 0) {
+      showToast('⚠️ 当前没有可展示的任务列表或测试清单');
       return;
     }
     setExecutionMode('stepwise');
     setTerminalVisible(true);
-    setTerminalOutput((prev) => prev || '[taskforge] 分步执行模式已就绪，请在右侧步骤列表中选择要执行的步骤。\n');
-    setTerminalStatus('请选择要执行的步骤');
+    setTerminalOutput((prev) => prev || '[taskforge] 分步模式已就绪，请在右侧任务列表或测试清单中选择要执行的内容。\n');
+    setTerminalStatus('请选择要执行的任务或测试');
   };
 
   const isDependencySatisfied = useCallback((step, completedIds = new Set()) => {
@@ -1422,6 +1565,100 @@ ${skillsBlock}
     await executeSelectedSteps([stepId]);
   }, [executeSelectedSteps, handleRollbackStep]);
 
+  const handleExecuteTest = useCallback(async (test) => {
+    if (!test?.aiExecutable) return;
+    if (!validateExecutionPrerequisites()) return;
+
+    stopRequestedRef.current = false;
+    currentStepIdRef.current = '';
+    setExecutionMode('stepwise');
+    setTerminalVisible(true);
+    setIsExecuting(true);
+    setTerminalOutput('');
+    setTerminalStatus('检查 Git 执行分支...');
+
+    updateTestRuntime(test.id, (current) => ({
+      ...current,
+      status: 'running',
+      runCount: (current.runCount || 0) + 1,
+      lastRunAt: new Date().toISOString(),
+      lastError: '',
+    }));
+
+    try {
+      const branchOk = await syncExecutionBranch();
+      if (!branchOk.ok) {
+        updateTestRuntime(test.id, (current) => ({
+          ...current,
+          status: 'failed',
+          lastError: '分支检查失败',
+        }));
+        setIsExecuting(false);
+        setTerminalStatus('分支检查失败');
+        return;
+      }
+
+      const prepareResult = await prepareExecutionResources();
+      if (prepareResult.aborted) {
+        updateTestRuntime(test.id, (current) => ({
+          ...current,
+          status: 'interrupted',
+        }));
+        setIsExecuting(false);
+        setTerminalStatus('执行已停止');
+        return;
+      }
+
+      appendTerminal(`\n[taskforge] ===== 开始执行测试: ${test.title} =====\n`);
+      const runResult = await runTaskWithCli({
+        title: `执行测试: ${test.title}`,
+        prompt: buildTestExecutionPrompt(test, orchestrationSteps),
+      });
+
+      if (runResult.aborted) {
+        updateTestRuntime(test.id, (current) => ({
+          ...current,
+          status: 'interrupted',
+          lastOutput: runResult.output || current.lastOutput || '',
+        }));
+        setIsExecuting(false);
+        setTerminalStatus('执行已停止');
+        return;
+      }
+
+      updateTestRuntime(test.id, (current) => ({
+        ...current,
+        status: 'completed',
+        lastCompletedAt: new Date().toISOString(),
+        lastOutput: runResult.output || current.lastOutput || '',
+      }));
+      setIsExecuting(false);
+      setTerminalStatus('测试执行完成');
+      appendTerminal(`[taskforge] 测试完成: ${test.title}\n`);
+      showToast(`✅ 测试完成：${test.title}`);
+    } catch (error) {
+      updateTestRuntime(test.id, (current) => ({
+        ...current,
+        status: 'failed',
+        lastError: error.message || '测试执行失败',
+      }));
+      setIsExecuting(false);
+      setTerminalStatus('测试执行失败');
+      appendTerminal(`[taskforge] ${error.message}\n`);
+      showToast(error.message || '❌ 测试执行失败');
+    } finally {
+      abortRef.current = null;
+    }
+  }, [
+    orchestrationSteps,
+    prepareExecutionResources,
+    runTaskWithCli,
+    showToast,
+    syncExecutionBranch,
+    updateTestRuntime,
+    validateExecutionPrerequisites,
+  ]);
+
   /** 仅在实际任务执行（立即/分步 CLI）进行中锁定，与「停止执行」一致 */
   const branchSwitchLocked = isExecuting;
   const gitReadyForRun = Boolean(state.projectPath?.trim()) && gitBranchState.ok && !gitBranchState.loading;
@@ -1430,6 +1667,7 @@ ${skillsBlock}
   const skillsBusy = skillsCatalogLoading || skillsAnalyzing;
   const canExecute = Boolean(selectedEngine) && cursorReadyForRun && !isExecuting && gitReadyForRun && !skillsBusy;
   const canOpenStepwise = !skillsBusy && !isExecuting && !isNormalizingSteps;
+  const hasGeneratedStepwiseArtifacts = orchestrationSteps.length > 0 || executableTests.length > 0;
   const canAnalyzeSkills = Boolean(selectedEngine) && Boolean(state.projectPath?.trim()) && !skillsBusy && !isExecuting && !isNormalizingSteps;
   const canInstallAllSkills = Boolean(state.projectPath)
     && installableSkillPackagesPlan.orderedPackages.length > 0
@@ -1699,7 +1937,7 @@ ${skillsBlock}
             disabled={!canOpenStepwise || isExecuting}
             style={{ opacity: canOpenStepwise && !isExecuting ? 1 : 0.55 }}
           >
-            ≡ 分步执行
+            {hasGeneratedStepwiseArtifacts ? '↻ 重新生成分步' : '≡ 生成分步'}
           </button>
           {isExecuting && (
             <button className="btn btn-danger" onClick={handleStopExecute}>
@@ -1865,7 +2103,7 @@ ${skillsBlock}
                   <div>
                     <div className="stepwise-sidebar-title">步骤详情</div>
                     <div className="stepwise-sidebar-subtitle">
-                      共 {orchestrationSteps.length} 步，已选 {selectedStepIds.length} 步
+                      共 {orchestrationSteps.length} 个任务，测试 {executableTests.length} 项，已选 {selectedStepIds.length} 项任务
                     </div>
                   </div>
                   <div className="stepwise-toolbar">
@@ -1970,6 +2208,83 @@ ${skillsBlock}
                       </div>
                     );
                   })}
+                </div>
+
+                <div className="stepwise-test-section">
+                  <div className="stepwise-sidebar-header" style={{ paddingTop: 18, borderTop: '1px solid var(--border)' }}>
+                    <div>
+                      <div className="stepwise-sidebar-title">测试清单</div>
+                      <div className="stepwise-sidebar-subtitle">
+                        共 {executableTests.length} 项，包含单测 / 集测 / 端到端 / 人工验证
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="stepwise-list">
+                    {executableTests.length === 0 ? (
+                      <div className="orchestration-step-card status-never">
+                        <div className="orchestration-step-desc">当前还没有生成测试清单，请先点击“生成分步”。</div>
+                      </div>
+                    ) : executableTests.map((test, index) => {
+                      const runtime = testRuntimeMap[test.id] || createTestRuntime();
+                      const isRunning = runtime.status === 'running';
+                      return (
+                        <div
+                          key={test.id}
+                          className={`orchestration-step-card status-${runtime.status}${isRunning ? ' active' : ''}`}
+                        >
+                          <div className="orchestration-step-header">
+                            <div className="orchestration-step-index">T{index + 1}</div>
+                            <div className="orchestration-step-main">
+                              <div className="orchestration-step-title-row">
+                                <div className="orchestration-step-title">{test.title}</div>
+                                <span className={`orchestration-step-badge badge-${runtime.status}`}>
+                                  {getRuntimeLabel(runtime.status)}
+                                </span>
+                              </div>
+                              <div className="orchestration-step-desc">
+                                {test.objective || test.executionHint || '请根据测试目标与命令完成验证。'}
+                              </div>
+                              <div className="orchestration-step-meta">
+                                <span>{getTestCategoryLabel(test.category)}</span>
+                                <span>{test.aiExecutable ? 'AI 可执行' : '需开发者自测'}</span>
+                                <span>命令 {test.commands?.length || 0}</span>
+                                {runtime.lastCompletedAt && (
+                                  <span>完成于 {formatTimeLabel(runtime.lastCompletedAt)}</span>
+                                )}
+                              </div>
+                              {!test.aiExecutable && (
+                                <div className="stepwise-test-note">
+                                  {test.manualNotes || '该项更适合由开发者手动验证，请按说明自测。'}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="orchestration-step-actions">
+                            {test.aiExecutable ? (
+                              isRunning ? (
+                                <button className="btn btn-danger btn-sm" onClick={handleStopExecute}>
+                                  停止
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  disabled={!gitReadyForRun || isExecuting}
+                                  onClick={() => handleExecuteTest(test)}
+                                >
+                                  执行测试
+                                </button>
+                              )
+                            ) : (
+                              <span className="form-hint">需开发者自测</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             )}
