@@ -6,6 +6,7 @@ import {
   aiExecuteTask,
   createStepCheckpoint,
   ensureGitBranch,
+  fetchCursorModels,
   fetchGitBranches,
   installSkillPackages,
   normalizeTaskOrchestration,
@@ -25,6 +26,10 @@ const ENGINE_OPTIONS = [
   { key: 'claude', label: 'Claude Code' },
   { key: 'cursor', label: 'Cursor CLI' },
 ];
+
+function getEngineLabel(engine) {
+  return ENGINE_OPTIONS.find((item) => item.key === engine)?.label || 'CLI';
+}
 
 function downloadTextFile(filename, content) {
   const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
@@ -242,6 +247,10 @@ ${orderedList}
 export default function Step5Prompts() {
   const { state, dispatch, copyToClipboard, showToast } = useAppContext();
   const [selectedEngine, setSelectedEngine] = useState(state.aiEngine || '');
+  const [cursorModels, setCursorModels] = useState([]);
+  const [cursorModelsLoading, setCursorModelsLoading] = useState(false);
+  const [cursorModelsError, setCursorModelsError] = useState('');
+  const [selectedCursorModel, setSelectedCursorModel] = useState('');
   const [skillsCatalogMeta, setSkillsCatalogMeta] = useState({
     loaded: false,
     total: 0,
@@ -345,6 +354,9 @@ export default function Step5Prompts() {
     if (persistedKey === restoredPromptStateKeyRef.current) return;
     restoredPromptStateKeyRef.current = persistedKey;
     setSelectedEngine(persistedPromptState.selectedEngine || state.aiEngine || '');
+    setCursorModels(Array.isArray(persistedPromptState.cursorModels) ? persistedPromptState.cursorModels : []);
+    setCursorModelsError(persistedPromptState.cursorModelsError || '');
+    setSelectedCursorModel(persistedPromptState.selectedCursorModel || '');
     setSkillsCatalogMeta(persistedPromptState.skillsCatalogMeta || {
       loaded: false,
       total: 0,
@@ -367,6 +379,43 @@ export default function Step5Prompts() {
     setSelectedExecBranch(persistedPromptState.selectedExecBranch || '');
     setGitBranchState(persistedPromptState.gitBranchState || { ok: true, loading: false, error: '' });
   }, [persistedPromptState, state.aiEngine]);
+
+  useEffect(() => {
+    if (selectedEngine !== 'cursor') {
+      setCursorModelsLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setCursorModelsLoading(true);
+    setCursorModelsError('');
+
+    fetchCursorModels()
+      .then((data) => {
+        if (cancelled) return;
+        const models = Array.isArray(data.models) ? data.models : [];
+        setCursorModels(models);
+        setSelectedCursorModel((prev) => {
+          if (prev && models.some((item) => item.id === prev)) return prev;
+          return models[0]?.id || '';
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCursorModels([]);
+        setCursorModelsError(error.message || '读取 Cursor 模型失败');
+        setSelectedCursorModel('');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCursorModelsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEngine]);
 
   useEffect(() => {
     const projectPath = state.projectPath?.trim();
@@ -455,6 +504,9 @@ export default function Step5Prompts() {
 
   const promptExecutionSnapshot = useMemo(() => ({
     selectedEngine,
+    selectedCursorModel,
+    cursorModels,
+    cursorModelsError,
     skillsCatalogMeta,
     skillsAnalysisDone,
     skillsAnalysisSummary,
@@ -473,12 +525,15 @@ export default function Step5Prompts() {
       ? { ok: false, loading: false, error: gitBranchState.error || '' }
       : gitBranchState,
   }), [
+    cursorModels,
+    cursorModelsError,
     execBranchCurrent,
     executionMode,
     gitBranchState,
     normalizedSteps,
     recommendedSkills,
     selectedEngine,
+    selectedCursorModel,
     selectedExecBranch,
     selectedStepIds,
     skillInstallSelected,
@@ -818,6 +873,29 @@ ${skillsBlock}
     copyToClipboard(promptText);
   };
 
+  const handleRefreshCursorModels = useCallback(async () => {
+    if (selectedEngine !== 'cursor') return;
+    setCursorModelsLoading(true);
+    setCursorModelsError('');
+    try {
+      const data = await fetchCursorModels();
+      const models = Array.isArray(data.models) ? data.models : [];
+      setCursorModels(models);
+      setSelectedCursorModel((prev) => {
+        if (prev && models.some((item) => item.id === prev)) return prev;
+        return models[0]?.id || '';
+      });
+      showToast(models.length ? '✅ Cursor 模型列表已刷新' : '⚠️ 当前未读取到可用模型');
+    } catch (error) {
+      setCursorModels([]);
+      setCursorModelsError(error.message || '读取 Cursor 模型失败');
+      setSelectedCursorModel('');
+      showToast(error.message || '❌ 读取 Cursor 模型失败');
+    } finally {
+      setCursorModelsLoading(false);
+    }
+  }, [selectedEngine, showToast]);
+
   const runSingleSkillPackageInstall = useCallback((projectPath, pkg) => (
     new Promise((resolve, reject) => {
       installSkillPackages(projectPath, [pkg], {
@@ -928,6 +1006,10 @@ ${skillsBlock}
       showToast('⚠️ 请先选择执行引擎');
       return false;
     }
+    if (selectedEngine === 'cursor' && !selectedCursorModel) {
+      showToast(cursorModelsError ? '⚠️ 请先处理 Cursor 模型列表加载失败' : '⚠️ 请选择 Cursor 模型');
+      return false;
+    }
     if (!state.projectPath) {
       showToast('⚠️ 请先在第一步配置项目路径');
       return false;
@@ -941,7 +1023,15 @@ ${skillsBlock}
       return false;
     }
     return true;
-  }, [orchestrationSteps.length, promptResources, selectedEngine, showToast, state.projectPath]);
+  }, [
+    cursorModelsError,
+    orchestrationSteps.length,
+    promptResources,
+    selectedCursorModel,
+    selectedEngine,
+    showToast,
+    state.projectPath,
+  ]);
 
   const prepareExecutionResources = useCallback(async () => {
     const saved = await savePromptResources(state.projectPath, promptResources);
@@ -970,6 +1060,7 @@ ${skillsBlock}
       abortRef.current = aiExecuteTask(
         {
           engine: selectedEngine,
+          model: selectedEngine === 'cursor' ? selectedCursorModel : '',
           projectPath: state.projectPath,
           task,
           projectContext: state.extraNotes || '',
@@ -993,7 +1084,7 @@ ${skillsBlock}
         }
       );
     })
-  ), [appendTerminal, selectedEngine, state.extraNotes, state.projectPath]);
+  ), [appendTerminal, selectedCursorModel, selectedEngine, state.extraNotes, state.projectPath]);
 
   const handleStopExecute = () => {
     if (abortRef.current) {
@@ -1024,7 +1115,7 @@ ${skillsBlock}
         setTerminalStatus('分支检查失败');
         return;
       }
-      setTerminalStatus(`准备使用 ${selectedEngine === 'claude' ? 'Claude Code' : 'Cursor CLI'} 执行...`);
+      setTerminalStatus(`准备使用 ${getEngineLabel(selectedEngine)} 执行...`);
 
       const prepareResult = await prepareExecutionResources();
       if (prepareResult.aborted) {
@@ -1032,7 +1123,7 @@ ${skillsBlock}
         setTerminalStatus('执行已停止');
         return;
       }
-      appendTerminal(`\n[taskforge] 即将启动 ${selectedEngine === 'claude' ? 'Claude Code' : 'Cursor CLI'}...\n\n`);
+      appendTerminal(`\n[taskforge] 即将启动 ${getEngineLabel(selectedEngine)}${selectedEngine === 'cursor' && selectedCursorModel ? `（模型: ${selectedCursorModel}）` : ''}...\n\n`);
       const result = await runTaskWithCli({
         title: '执行 Prompt 资源任务',
         prompt: promptText,
@@ -1334,8 +1425,10 @@ ${skillsBlock}
   /** 仅在实际任务执行（立即/分步 CLI）进行中锁定，与「停止执行」一致 */
   const branchSwitchLocked = isExecuting;
   const gitReadyForRun = Boolean(state.projectPath?.trim()) && gitBranchState.ok && !gitBranchState.loading;
+  const cursorReadyForRun = selectedEngine !== 'cursor'
+    || (Boolean(selectedCursorModel) && !cursorModelsLoading && !cursorModelsError);
   const skillsBusy = skillsCatalogLoading || skillsAnalyzing;
-  const canExecute = Boolean(selectedEngine) && !isExecuting && gitReadyForRun && !skillsBusy;
+  const canExecute = Boolean(selectedEngine) && cursorReadyForRun && !isExecuting && gitReadyForRun && !skillsBusy;
   const canOpenStepwise = !skillsBusy && !isExecuting && !isNormalizingSteps;
   const canAnalyzeSkills = Boolean(selectedEngine) && Boolean(state.projectPath?.trim()) && !skillsBusy && !isExecuting && !isNormalizingSteps;
   const canInstallAllSkills = Boolean(state.projectPath)
@@ -1522,17 +1615,74 @@ ${skillsBlock}
           style={{ minHeight: 320, marginBottom: 20 }}
         />
 
-        <div className="template-tabs" style={{ marginBottom: 16 }}>
-          {ENGINE_OPTIONS.map((engine) => (
-            <button
-              key={engine.key}
-              className={`template-tab${selectedEngine === engine.key ? ' active' : ''}`}
-              onClick={() => setSelectedEngine(engine.key)}
+        <div
+          style={{
+            display: 'flex',
+            gap: 12,
+            marginBottom: 16,
+            flexWrap: 'wrap',
+            alignItems: 'flex-end',
+          }}
+        >
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
+            <span style={{ fontSize: '0.9em', opacity: 0.85 }}>执行引擎</span>
+            <select
+              className="form-select"
+              value={selectedEngine}
+              onChange={(e) => setSelectedEngine(e.target.value)}
             >
-              {engine.label}
-            </button>
-          ))}
+              <option value="">请选择执行引擎</option>
+              {ENGINE_OPTIONS.map((engine) => (
+                <option key={engine.key} value={engine.key}>
+                  {engine.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {selectedEngine === 'cursor' && (
+            <>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 260, flex: '1 1 320px' }}>
+                <span style={{ fontSize: '0.9em', opacity: 0.85 }}>Cursor 模型</span>
+                <select
+                  className="form-select"
+                  value={selectedCursorModel}
+                  onChange={(e) => setSelectedCursorModel(e.target.value)}
+                  disabled={cursorModelsLoading || cursorModels.length === 0}
+                >
+                  <option value="">
+                    {cursorModelsLoading ? '正在读取模型列表…' : (cursorModels.length ? '请选择模型' : '暂无可用模型')}
+                  </option>
+                  {cursorModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label || model.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRefreshCursorModels}
+                disabled={cursorModelsLoading}
+              >
+                {cursorModelsLoading ? '刷新中…' : '🔄 刷新模型'}
+              </button>
+            </>
+          )}
         </div>
+
+        {selectedEngine === 'cursor' && (
+          <div className="form-hint" style={{ marginBottom: 16, color: cursorModelsError ? 'var(--danger, #c62828)' : undefined }}>
+            {cursorModelsError
+              ? cursorModelsError
+              : cursorModelsLoading
+                ? '正在通过 Cursor CLI 读取当前账号可用模型列表…'
+                : selectedCursorModel
+                  ? `当前执行模型：${selectedCursorModel}`
+                  : '请选择一个 Cursor 模型后再执行。'}
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
           <button
@@ -1691,7 +1841,8 @@ ${skillsBlock}
                   <span className="dot green" />
                 </div>
                 <div className="terminal-title">
-                  {selectedEngine === 'claude' ? 'Claude Code' : selectedEngine === 'cursor' ? 'Cursor CLI' : 'CLI'}
+                  {getEngineLabel(selectedEngine)}
+                  {selectedEngine === 'cursor' && selectedCursorModel ? ` · ${selectedCursorModel}` : ''}
                   {terminalStatus ? ` · ${terminalStatus}` : ''}
                 </div>
               </div>

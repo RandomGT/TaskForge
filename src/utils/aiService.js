@@ -203,6 +203,24 @@ export async function analyzeRecommendedSkills(payload) {
   return res.json();
 }
 
+export async function fetchCursorModels() {
+  const res = await fetch(`${API_BASE}/cursor/models`, {
+    signal: AbortSignal.timeout(15000),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error('获取 Cursor 模型失败：后端接口不存在。请重启 `node server.js` 或重新执行 `npm start`，让新的 `/api/cursor/models` 路由生效。');
+    }
+    throw new Error(data.error || `获取 Cursor 模型失败: HTTP ${res.status}`);
+  }
+  if (!data.ok) {
+    throw new Error(data.error || '获取 Cursor 模型失败');
+  }
+  return data;
+}
+
 /**
  * 将 Skill 对应 npm 包拉取到临时目录后，写入 projectPath/.cursor/skills/（projectPath 与第一步表单一致）（SSE）
  */

@@ -317,7 +317,58 @@ function createCursorStreamState(sendSSE) {
   };
 }
 
-function buildCliArgs(engine, prompt) {
+function parseCursorModelsOutput(output = '') {
+  const cleaned = stripAnsi(String(output || ''))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^loading models/i.test(line))
+    .filter((line) => !/^available models[:：]?$/i.test(line))
+    .filter((line) => !/^models?[:：]?$/i.test(line));
+
+  const models = [];
+  const seen = new Set();
+
+  for (const line of cleaned) {
+    let candidate = line
+      .replace(/^[-*]\s+/, '')
+      .replace(/^\d+\.\s+/, '')
+      .trim();
+
+    if (!candidate) continue;
+
+    if ((candidate.startsWith('[') && candidate.endsWith(']')) || (candidate.startsWith('{') && candidate.endsWith('}'))) {
+      try {
+        const parsed = JSON.parse(candidate);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of items) {
+          const value = String(item?.id || item?.name || item?.model || '').trim();
+          if (value && !seen.has(value)) {
+            seen.add(value);
+            models.push({ id: value, label: value });
+          }
+        }
+        continue;
+      } catch {
+        // ignore JSON parse failure and continue with plain text parsing
+      }
+    }
+
+    const firstToken = candidate.split(/\s+/)[0]?.trim();
+    if (!firstToken) continue;
+    if (!/^[a-z0-9][a-z0-9._:/+-]*$/i.test(firstToken)) continue;
+    if (/^(error|warning|info|hint)$/i.test(firstToken)) continue;
+
+    if (!seen.has(firstToken)) {
+      seen.add(firstToken);
+      models.push({ id: firstToken, label: firstToken });
+    }
+  }
+
+  return models;
+}
+
+function buildCliArgs(engine, prompt, options = {}) {
   if (engine === 'claude') {
     return {
       command: 'claude',
@@ -327,9 +378,14 @@ function buildCliArgs(engine, prompt) {
   }
 
   if (engine === 'cursor') {
+    const args = ['-p', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--approve-mcps'];
+    if (options.model) {
+      args.push('--model', options.model);
+    }
+    args.push(prompt);
     return {
       command: CURSOR_AGENT_BIN,
-      args: ['-p', '--output-format', 'stream-json', '--stream-partial-output', '--force', '--approve-mcps', prompt],
+      args,
       mode: 'cursor-stream-json',
       usePty: true,
     };
@@ -1945,6 +2001,56 @@ app.get('/api/engines', async (req, res) => {
   res.json({ engines });
 });
 
+app.get('/api/cursor/models', async (req, res) => {
+  const attempts = [
+    { args: ['models'], source: 'agent models' },
+    { args: ['--list-models'], source: 'agent --list-models' },
+  ];
+
+  for (const attempt of attempts) {
+    const result = await new Promise((resolve) => {
+      const proc = spawn(CURSOR_AGENT_BIN, attempt.args, { shell: false, timeout: 15000 });
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      proc.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      proc.on('close', (code) => resolve({ code, stdout, stderr }));
+      proc.on('error', (error) => resolve({ code: -1, stdout, stderr, error }));
+    });
+
+    const combined = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+    const models = parseCursorModelsOutput(result.stdout || combined);
+
+    if (result.code === 0 && models.length > 0) {
+      res.json({
+        ok: true,
+        models,
+        source: attempt.source,
+      });
+      return;
+    }
+
+    if (result.code === 0 && !models.length) {
+      res.status(500).json({
+        ok: false,
+        error: `已执行 ${attempt.source}，但未解析到可用模型列表`,
+        detail: combined,
+      });
+      return;
+    }
+  }
+
+  res.status(500).json({
+    ok: false,
+    error: `无法从 Cursor CLI 读取模型列表。请先确认已登录 ${CURSOR_AGENT_BIN}，或配置 CURSOR_API_KEY。`,
+  });
+});
+
 // AI-powered task split (streaming)
 app.post('/api/split', (req, res) => {
   const { engine, projectPath, requirement, techStack, extraNotes, splitStrategy, figmaPages, projectFiles } = req.body;
@@ -2262,7 +2368,7 @@ app.post('/api/normalize-orchestration', (req, res) => {
 
 // Execute a single task via AI CLI (streaming)
 app.post('/api/execute', (req, res) => {
-  const { engine, projectPath, task, projectContext } = req.body;
+  const { engine, projectPath, task, projectContext, model } = req.body;
 
   if (!engine || !projectPath || !task) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -2283,11 +2389,15 @@ app.post('/api/execute', (req, res) => {
   sendSSE('status', { message: `正在执行任务: ${task.title}` });
   sendSSE('chunk', { text: `[server] 正在启动 ${engine} CLI...\n` });
 
-  const cli = buildCliArgs(engine, prompt);
+  const cli = buildCliArgs(engine, prompt, { model });
   if (!cli) {
     sendSSE('error', { message: `不支持的引擎: ${engine}` });
     res.end();
     return;
+  }
+
+  if (engine === 'cursor' && model) {
+    sendSSE('chunk', { text: `[server] Cursor 模型: ${model}\n` });
   }
 
   const startedAt = Date.now();
