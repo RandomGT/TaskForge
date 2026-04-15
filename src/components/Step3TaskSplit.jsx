@@ -5,13 +5,61 @@ import { aiOrchestrateStage } from '../utils/aiService';
 import { persistJobState } from '../utils/jobApi';
 import { assignFigmaIdsToTasks } from '../utils/figmaPages';
 import { buildPromptPackagesForTasks } from '../domains/prompts/promptPackage';
-import { parseExecutionPlanDraft, parseIntentDraft, parseTaskOrchestrationDraft } from '../domains/pipeline/draftParsers';
+import {
+  parseExecutionPlanDraft,
+  parseIntentDraft,
+  parseTaskOrchestrationDraft,
+} from '../domains/pipeline/draftParsers';
+
+const STAGE_CONFIGS = [
+  {
+    key: 'intents',
+    stage: 'intent',
+    field: 'intentDecomposition',
+    title: '意图拆解',
+    icon: '🧠',
+    description: '先梳理目标、约束和关键用户故事。重新生成后，会同步清空后续的执行计划与任务编排。',
+    statusText: '正在执行意图拆解...',
+    placeholder: '点击“开始生成”后，这里会生成意图拆解结果。',
+  },
+  {
+    key: 'plan',
+    stage: 'plan',
+    field: 'executionPlan',
+    title: '执行计划',
+    icon: '🗺️',
+    description: '基于意图拆解输出实现路径、资源配置和关键风险。重新生成后，会同步清空任务编排。',
+    statusText: '正在执行执行计划...',
+    placeholder: '完成意图拆解后，这里会生成执行计划结果。',
+    dependsOn: 'intentDecomposition',
+  },
+  {
+    key: 'tasks',
+    stage: 'tasks',
+    field: 'taskOrchestration',
+    title: '任务编排',
+    icon: '📋',
+    description: '基于执行计划拆出可执行任务与依赖关系，供下一步直接执行。',
+    statusText: '正在执行任务编排...',
+    placeholder: '完成执行计划后，这里会生成任务编排结果。',
+    dependsOn: 'executionPlan',
+  },
+];
+
+const EMPTY_DRAFTS = {
+  intentDecomposition: '',
+  executionPlan: '',
+  taskOrchestration: '',
+};
 
 export default function Step3TaskSplit() {
   const { state, dispatch, showToast } = useAppContext();
   const abortRef = useRef(null);
+  const runningStageRef = useRef('');
   const [showLog, setShowLog] = useState(false);
   const [activeView, setActiveView] = useState('intents');
+  const [runningStageKey, setRunningStageKey] = useState('');
+
   const appendAiLog = useCallback((text) => {
     dispatch({ type: 'AI_CHUNK', text });
   }, [dispatch]);
@@ -55,61 +103,47 @@ export default function Step3TaskSplit() {
     await persistJobState(state.currentJobId, state, overrides);
   }, [state, state.currentJobId]);
 
-  const handleStopAI = () => {
-    if (abortRef.current) {
-      abortRef.current();
-      abortRef.current = null;
-    }
-    dispatch({ type: 'AI_DONE' });
-    showToast('⏹️ 已停止拆分');
-  };
-
-  const handleDraftChange = (field, value) => {
-    const nextDrafts = {
-      ...state.splitDrafts,
-      [field]: value,
+  const buildStepPayloads = useCallback(() => {
+    const step1Json = {
+      aiEngine: state.aiEngine,
+      projectPath: state.projectPath,
+      projectName: state.projectName,
+      requirementDesc: state.requirementDesc,
+      techStack: state.techStack,
+      extraNotes: state.extraNotes,
+      projectFiles: state.projectFiles,
     };
-    dispatch({ type: 'UPDATE_SPLIT_DRAFT', field, value });
-    const snapshot = syncDraftsToModels(nextDrafts);
-    saveStageSnapshot(snapshot).catch(() => {
-      showToast('⚠️ 拆分内容已更新，但立即保存失败');
-    });
-  };
+    const step2Json = {
+      figmaPages: state.figmaPages,
+      apiResources: state.apiResources,
+      imageResources: state.imageResources,
+      otherResources: state.otherResources,
+    };
+    return { step1Json, step2Json };
+  }, [state]);
 
-  const activeDraftField = {
-    intents: 'intentDecomposition',
-    plan: 'executionPlan',
-    tasks: 'taskOrchestration',
-  }[activeView];
-
-  const activeDraftTitle = {
-    intents: '意图拆解',
-    plan: '执行计划',
-    tasks: '任务编排',
-  }[activeView];
-
-  const activeDraftValue = state.splitDrafts[activeDraftField] || '';
-
-  const activeDraftPlaceholder = {
-    intents: '点击“开始拆分”后，这里会生成意图拆解结果。',
-    plan: '点击“开始拆分”后，这里会生成执行计划结果。',
-    tasks: '点击“开始拆分”后，这里会生成任务编排结果。',
-  }[activeView];
-
-  const hasDrafts = Boolean(
-    state.splitDrafts.intentDecomposition ||
-    state.splitDrafts.executionPlan ||
-    state.splitDrafts.taskOrchestration
-  );
-
-  const summaryStats = {
-    intentCount: state.intentGraph?.intents?.length || 0,
-    taskCount: state.tasks.length,
-    planSummary: state.executionPlan?.summary || '',
-  };
+  const buildResetDraftsForStage = useCallback((field) => {
+    if (field === 'intentDecomposition') {
+      return { ...EMPTY_DRAFTS };
+    }
+    if (field === 'executionPlan') {
+      return {
+        intentDecomposition: state.splitDrafts.intentDecomposition || '',
+        executionPlan: '',
+        taskOrchestration: '',
+      };
+    }
+    return {
+      intentDecomposition: state.splitDrafts.intentDecomposition || '',
+      executionPlan: state.splitDrafts.executionPlan || '',
+      taskOrchestration: '',
+    };
+  }, [state.splitDrafts]);
 
   const runStage = useCallback((stage, step1Json, step2Json, previousOutputs) => {
     return new Promise((resolve, reject) => {
+      let settled = false;
+
       if (abortRef.current) {
         abortRef.current();
       }
@@ -133,18 +167,63 @@ export default function Step3TaskSplit() {
           },
           onChunk: (text) => appendAiLog(text),
           onResult: (data) => {
+            if (settled) return;
+            settled = true;
             appendAiLog(`\n========== 阶段 ${stage.toUpperCase()} 完成 ==========\n`);
-            resolve(data.output || '');
+            resolve({ aborted: false, output: data.output || '' });
           },
-          onRaw: (text) => resolve(text || ''),
-          onError: (msg, stderr) => reject(new Error(msg + (stderr ? `\n${stderr}` : ''))),
-          onDone: () => {},
+          onRaw: (text) => {
+            if (settled) return;
+            settled = true;
+            resolve({ aborted: false, output: text || '' });
+          },
+          onError: (msg, stderr) => {
+            if (settled) return;
+            settled = true;
+            reject(new Error(msg + (stderr ? `\n${stderr}` : '')));
+          },
+          onDone: () => {
+            if (settled) return;
+            settled = true;
+            resolve({ aborted: true, output: '' });
+          },
         }
       );
     });
   }, [appendAiLog, dispatch, state.aiEngine, state.projectFiles, state.projectPath]);
 
-  const handleStartSplit = useCallback(async () => {
+  const resetRunningState = useCallback(() => {
+    abortRef.current = null;
+    runningStageRef.current = '';
+    setRunningStageKey('');
+    dispatch({ type: 'AI_DONE' });
+  }, [dispatch]);
+
+  const handleStopAI = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current();
+      abortRef.current = null;
+    }
+    const currentStage = runningStageRef.current;
+    runningStageRef.current = '';
+    setRunningStageKey('');
+    dispatch({ type: 'AI_DONE' });
+    showToast(currentStage ? `⏹️ 已停止${currentStage}` : '⏹️ 已停止拆分');
+  }, [dispatch, showToast]);
+
+  const handleDraftChange = (field, value) => {
+    const nextDrafts = {
+      ...state.splitDrafts,
+      [field]: value,
+    };
+    dispatch({ type: 'UPDATE_SPLIT_DRAFT', field, value });
+    const snapshot = syncDraftsToModels(nextDrafts);
+    saveStageSnapshot(snapshot).catch(() => {
+      showToast('⚠️ 拆分内容已更新，但立即保存失败');
+    });
+  };
+
+  const runSingleStage = useCallback(async (config) => {
     if (!state.requirementDesc.trim()) {
       dispatch({ type: 'SET_STEP', step: 1 });
       return;
@@ -154,113 +233,92 @@ export default function Step3TaskSplit() {
       dispatch({ type: 'SET_STEP', step: 1 });
       return;
     }
+    if (config.dependsOn && !String(state.splitDrafts[config.dependsOn] || '').trim()) {
+      const dependencyLabel = config.dependsOn === 'intentDecomposition' ? '意图拆解' : '执行计划';
+      showToast(`⚠️ 请先完成${dependencyLabel}`);
+      return;
+    }
 
-    dispatch({ type: 'AI_START', status: '正在执行阶段 1/3：意图拆解...' });
+    const resetDrafts = buildResetDraftsForStage(config.field);
+    const resetSnapshot = syncDraftsToModels(resetDrafts);
+
+    dispatch({ type: 'AI_START', status: config.statusText });
     dispatch({ type: 'SET_SPLIT_STARTED', value: true });
-    dispatch({
-      type: 'SET_SPLIT_DRAFTS',
-      value: {
-        intentDecomposition: '',
-        executionPlan: '',
-        taskOrchestration: '',
-      },
-    });
+    runningStageRef.current = config.title;
+    setRunningStageKey(config.key);
+    setShowLog(true);
+    setActiveView(config.key);
+
     try {
       await saveStageSnapshot({
+        ...resetSnapshot,
         currentStep: 3,
-        splitStarted: true,
-        splitDrafts: {
-          intentDecomposition: '',
-          executionPlan: '',
-          taskOrchestration: '',
-        },
       });
     } catch {
-      showToast('⚠️ 已开始新一轮拆分，但初始化保存失败');
+      showToast('⚠️ 已开始新的阶段生成，但初始化保存失败');
     }
-    setShowLog(true);
-    setActiveView('intents');
 
-    const step1Json = {
-      aiEngine: state.aiEngine,
-      projectPath: state.projectPath,
-      projectName: state.projectName,
-      requirementDesc: state.requirementDesc,
-      techStack: state.techStack,
-      extraNotes: state.extraNotes,
-      projectFiles: state.projectFiles,
-    };
-    const step2Json = {
-      figmaPages: state.figmaPages,
-      apiResources: state.apiResources,
-      imageResources: state.imageResources,
-      otherResources: state.otherResources,
+    const { step1Json, step2Json } = buildStepPayloads();
+    const previousOutputs = {
+      intentDecomposition: resetDrafts.intentDecomposition || '',
+      executionPlan: resetDrafts.executionPlan || '',
+      taskOrchestration: resetDrafts.taskOrchestration || '',
     };
 
     try {
-      const intentDecomposition = await runStage('intent', step1Json, step2Json, {});
-      const draftsAfterIntent = {
-        intentDecomposition,
-        executionPlan: '',
-        taskOrchestration: '',
-      };
-      const intentGraph = parseIntentDraft(intentDecomposition);
-      dispatch({ type: 'SET_SPLIT_DRAFTS', value: draftsAfterIntent });
-      dispatch({
-        type: 'SET_PIPELINE_DATA',
-        intentGraph,
-        splitDrafts: draftsAfterIntent,
-        splitStarted: true,
-      });
-      await saveStageSnapshot({
-        currentStep: 3,
-        intentGraph,
-        splitDrafts: draftsAfterIntent,
-        splitStarted: true,
-      });
-      setActiveView('plan');
-      dispatch({ type: 'AI_STATUS', status: '正在执行阶段 2/3：执行计划...' });
+      const result = await runStage(config.stage, step1Json, step2Json, previousOutputs);
+      if (result.aborted) {
+        return;
+      }
 
-      const executionPlan = await runStage('plan', step1Json, step2Json, draftsAfterIntent);
-      const draftsAfterPlan = {
-        ...draftsAfterIntent,
-        executionPlan,
+      const nextDrafts = {
+        ...resetDrafts,
+        [config.field]: result.output,
       };
-      const parsedExecutionPlan = parseExecutionPlanDraft(executionPlan);
-      dispatch({ type: 'SET_SPLIT_DRAFTS', value: draftsAfterPlan });
-      dispatch({
-        type: 'SET_PIPELINE_DATA',
-        executionPlan: parsedExecutionPlan,
-        splitDrafts: draftsAfterPlan,
-        splitStarted: true,
-      });
+      const snapshot = syncDraftsToModels(nextDrafts);
       await saveStageSnapshot({
-        currentStep: 3,
-        executionPlan: parsedExecutionPlan,
-        splitDrafts: draftsAfterPlan,
-        splitStarted: true,
-      });
-      setActiveView('tasks');
-      dispatch({ type: 'AI_STATUS', status: '正在执行阶段 3/3：任务编排...' });
-
-      const taskOrchestration = await runStage('tasks', step1Json, step2Json, draftsAfterPlan);
-      const finalDrafts = {
-        ...draftsAfterPlan,
-        taskOrchestration,
-      };
-      const finalSnapshot = syncDraftsToModels(finalDrafts);
-      await saveStageSnapshot({
-        ...finalSnapshot,
+        ...snapshot,
         currentStep: 3,
       });
-      setActiveView('intents');
-      dispatch({ type: 'AI_DONE' });
-      showToast('✅ 三阶段拆分完成');
+      showToast(`✅ ${config.title}已完成`);
     } catch (err) {
       dispatch({ type: 'AI_ERROR', message: err.message || String(err) });
-      showToast('❌ 智能拆分失败');
+      showToast(`❌ ${config.title}失败`);
+      return;
+    } finally {
+      resetRunningState();
     }
-  }, [dispatch, runStage, saveStageSnapshot, showToast, state, syncDraftsToModels]);
+  }, [
+    buildResetDraftsForStage,
+    buildStepPayloads,
+    dispatch,
+    resetRunningState,
+    runStage,
+    saveStageSnapshot,
+    showToast,
+    state.aiEngine,
+    state.projectPath,
+    state.requirementDesc,
+    state.splitDrafts,
+    syncDraftsToModels,
+  ]);
+
+  const activeDraftField = STAGE_CONFIGS.find((item) => item.key === activeView)?.field || 'intentDecomposition';
+  const activeDraftTitle = STAGE_CONFIGS.find((item) => item.key === activeView)?.title || '意图拆解';
+  const activeDraftValue = state.splitDrafts[activeDraftField] || '';
+  const activeDraftPlaceholder = STAGE_CONFIGS.find((item) => item.key === activeView)?.placeholder || '';
+
+  const hasDrafts = Boolean(
+    state.splitDrafts.intentDecomposition ||
+    state.splitDrafts.executionPlan ||
+    state.splitDrafts.taskOrchestration
+  );
+
+  const summaryStats = {
+    intentCount: state.intentGraph?.intents?.length || 0,
+    taskCount: state.tasks.length,
+    planSummary: state.executionPlan?.summary || '',
+  };
 
   const jumpToStep = async (step) => {
     dispatch({ type: 'SET_STEP', step });
@@ -276,24 +334,57 @@ export default function Step3TaskSplit() {
     <div className="step-content active fade-in">
       <div className="resource-section-title" style={{ marginBottom: 16 }}>🧩 智能拆分</div>
       <div className="split-launch-card">
-        <div className="split-launch-title">开始拆分</div>
+        <div className="split-launch-title">分阶段生成</div>
         <div className="split-launch-desc">
-          系统会读取第一步的项目与需求信息、第二步的资源信息，并结合当前项目代码结构，一次性编排出「意图拆解」「执行计划」「任务编排」三份草稿。
+          现在三个阶段可以分别启动和停止。执行计划依赖意图拆解，任务编排依赖执行计划；如果你重新生成上游阶段，系统会自动清空下游结果，保证依赖关系一致。
         </div>
-        {state.aiLoading ? (
-          <button className="btn btn-danger" onClick={handleStopAI}>⏹️ 停止拆分</button>
-        ) : (
-          <button
-            className="btn btn-primary btn-lg"
-            onClick={handleStartSplit}
-            disabled={!state.aiEngine || !state.projectPath}
-          >
-            ▶ 开始拆分
-          </button>
-        )}
+
+        <div className="split-stage-grid">
+          {STAGE_CONFIGS.map((config) => {
+            const hasOutput = Boolean(String(state.splitDrafts[config.field] || '').trim());
+            const dependencyReady = !config.dependsOn || Boolean(String(state.splitDrafts[config.dependsOn] || '').trim());
+            const isRunning = runningStageKey === config.key;
+            const isOtherStageRunning = Boolean(runningStageKey && !isRunning);
+            const statusClass = isRunning ? 'running' : (hasOutput ? 'completed' : 'never');
+            const statusText = isRunning ? '运行中' : (hasOutput ? '已完成' : (dependencyReady ? '未开始' : '等待前置'));
+
+            return (
+              <div key={config.key} className={`split-stage-card${isRunning ? ' active' : ''}`}>
+                <div className="split-stage-header">
+                  <div className="split-stage-title">{config.icon} {config.title}</div>
+                  <span className={`orchestration-step-badge badge-${statusClass}`}>{statusText}</span>
+                </div>
+                <div className="split-stage-desc">{config.description}</div>
+                {!dependencyReady && (
+                  <div className="split-stage-dependency">
+                    依赖未满足：请先完成{config.dependsOn === 'intentDecomposition' ? '意图拆解' : '执行计划'}。
+                  </div>
+                )}
+                <div className="split-stage-actions">
+                  {isRunning ? (
+                    <button className="btn btn-danger" onClick={handleStopAI}>⏹️ 停止</button>
+                  ) : (
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => runSingleStage(config)}
+                      disabled={!state.aiEngine || !state.projectPath || !dependencyReady || isOtherStageRunning}
+                    >
+                      {hasOutput ? '↻ 重新生成' : '▶ 开始生成'}
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setActiveView(config.key)}
+                  >
+                    查看内容
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      {/* AI Log Panel */}
       {(state.aiLoading || state.aiLog) && (
         <div className="ai-log-panel">
           <div className="ai-log-header" onClick={() => setShowLog(!showLog)}>
