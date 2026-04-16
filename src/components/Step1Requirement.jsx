@@ -1,7 +1,7 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
-import { checkHealth, getEngines, listProjectFiles } from '../utils/aiService';
+import { checkHealth, listProjectFiles } from '../utils/aiService';
 import { buildPersistableState } from '../utils/persistState';
 import { createJob, updateJob } from '../utils/jobApi';
 
@@ -9,29 +9,14 @@ export default function Step1Requirement() {
   const { state, dispatch, showToast } = useAppContext();
   const navigate = useNavigate();
   const tagInputRef = useRef(null);
-  const [checkingEngine, setCheckingEngine] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const engineLookup = Object.fromEntries((state.availableEngines || []).map((engine) => [engine.name, engine]));
-
-  // Check server health and available engines on mount
+  // Check server health on mount
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
-      setCheckingEngine(true);
       const online = await checkHealth();
       if (cancelled) return;
       dispatch({ type: 'SET_SERVER_ONLINE', online });
-
-      if (online) {
-        const engines = await getEngines();
-        if (cancelled) return;
-        dispatch({ type: 'SET_AVAILABLE_ENGINES', engines });
-        // Auto-select first engine if none selected
-        if (!state.aiEngine && engines.length > 0) {
-          dispatch({ type: 'SET_ENGINE', engine: engines[0].name });
-        }
-      }
-      setCheckingEngine(false);
     };
     check();
     return () => { cancelled = true; };
@@ -59,15 +44,6 @@ export default function Step1Requirement() {
     if (!state.projectPath.trim()) {
       shakeElement(document.getElementById('projectPath'));
       showToast('⚠️ 请先填写项目路径');
-      return;
-    }
-    if (!state.aiEngine) {
-      showToast('⚠️ 请选择 AI 引擎');
-      return;
-    }
-    const selectedEngine = engineLookup[state.aiEngine];
-    if (selectedEngine?.authenticated === false) {
-      showToast(`⚠️ ${selectedEngine.authMessage || '当前引擎未完成认证，暂时无法执行'}`);
       return;
     }
     if (!state.projectName.trim()) {
@@ -117,41 +93,11 @@ export default function Step1Requirement() {
     }
   };
 
-  const refreshEngines = async () => {
-    setCheckingEngine(true);
-    const online = await checkHealth();
-    dispatch({ type: 'SET_SERVER_ONLINE', online });
-    if (online) {
-      const engines = await getEngines();
-      dispatch({ type: 'SET_AVAILABLE_ENGINES', engines });
-      if (engines.length > 0) {
-        const ready = engines.filter((engine) => engine.authenticated !== false).map((engine) => engine.name);
-        const blocked = engines.filter((engine) => engine.authenticated === false).map((engine) => engine.name);
-        if (blocked.length > 0) {
-          showToast(`⚠️ 已检测到 ${engines.map(e => e.name).join(', ')}，其中 ${blocked.join(', ')} 未认证`);
-        } else {
-          showToast(`✅ 检测到 ${ready.join(', ')}`);
-        }
-      } else {
-        showToast('⚠️ 未检测到可用的 AI CLI 工具');
-      }
-    } else {
-      showToast('❌ 后端服务未启动，请运行 node server.js');
-    }
-    setCheckingEngine(false);
-  };
-
-  const engineOptions = [
-    { key: 'claude', icon: '🤖', name: 'Claude Code', desc: 'Anthropic Claude CLI' },
-    { key: 'cursor', icon: '⚡', name: 'Cursor CLI', desc: 'Cursor Agent CLI' },
-  ];
-
   return (
     <div className="step-content active fade-in">
-      {/* AI Engine Configuration */}
       <div className="ai-config-section">
         <div className="resource-section-title" style={{ marginBottom: 12 }}>
-          🧠 AI 引擎配置
+          📂 项目与连接
           {!state.serverOnline && (
             <span className="server-badge offline">● 服务离线</span>
           )}
@@ -174,56 +120,6 @@ export default function Step1Requirement() {
               ? `📁 已扫描到 ${state.projectFiles.length} 个文件`
               : '输入你要让 AI 操作的项目根目录绝对路径'}
           </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">
-            选择 AI 引擎 <span className="required">*</span>
-            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 8, fontSize: 12 }} onClick={refreshEngines} disabled={checkingEngine}>
-              {checkingEngine ? '检测中...' : '🔄 重新检测'}
-            </button>
-          </label>
-          <div className="engine-grid">
-            {engineOptions.map(eng => {
-              const engineState = engineLookup[eng.key];
-              const available = Boolean(engineState);
-              const authenticated = engineState?.authenticated;
-              const selected = state.aiEngine === eng.key;
-              return (
-                <div
-                  key={eng.key}
-                  className={`engine-card${selected ? ' selected' : ''}${!available ? ' disabled' : ''}${authenticated === false ? ' warning' : ''}`}
-                  onClick={() => {
-                    if (available) {
-                      dispatch({ type: 'SET_ENGINE', engine: eng.key });
-                      if (authenticated === false) {
-                        showToast(`⚠️ ${engineState?.authMessage || `${eng.name} 已安装，但当前未认证`}`);
-                      }
-                    } else {
-                      showToast(`⚠️ ${eng.name} CLI 未安装或不可用`);
-                    }
-                  }}
-                >
-                  <div className="engine-icon">{eng.icon}</div>
-                  <div>
-                    <div className="engine-name">{eng.name}</div>
-                    <div className="engine-desc">{eng.desc}</div>
-                    {available && engineState?.authMessage && (
-                      <div className="engine-status-text">{engineState.authMessage}</div>
-                    )}
-                  </div>
-                  {available && authenticated === false && <span className="engine-badge auth-warning">需认证</span>}
-                  {available && authenticated !== false && <span className="engine-badge available">✓ 可用</span>}
-                  {!available && <span className="engine-badge unavailable">未检测到</span>}
-                </div>
-              );
-            })}
-          </div>
-          {state.aiEngine && engineLookup[state.aiEngine]?.authenticated === false && (
-            <div className="form-hint" style={{ color: 'var(--orange)' }}>
-              ⚠️ 当前选择的引擎已安装但未完成认证。请先在终端执行 <code>agent login</code>，或配置 <code>CURSOR_API_KEY</code>。
-            </div>
-          )}
           {!state.serverOnline && (
             <div className="form-hint" style={{ color: 'var(--orange)' }}>
               ⚠️ 后端服务未启动。请先运行: <code>node server.js</code>

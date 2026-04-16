@@ -1,7 +1,7 @@
-import React, { useRef, useCallback, useState } from 'react';
+import React, { useRef, useCallback, useState, useLayoutEffect, useEffect } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { getNextTaskId } from '../utils/taskSplitter';
-import { aiOrchestrateStage } from '../utils/aiService';
+import { aiOrchestrateStage, fetchCursorModels } from '../utils/aiService';
 import { persistJobState } from '../utils/jobApi';
 import { assignFigmaIdsToTasks } from '../utils/figmaPages';
 import { buildPromptPackagesForTasks } from '../domains/prompts/promptPackage';
@@ -52,13 +52,108 @@ const EMPTY_DRAFTS = {
   taskOrchestration: '',
 };
 
+const ENGINE_OPTIONS = [
+  { key: 'claude', label: 'Claude Code' },
+  { key: 'cursor', label: 'Cursor CLI' },
+];
+
 export default function Step3TaskSplit() {
   const { state, dispatch, showToast } = useAppContext();
+  const [cursorModels, setCursorModels] = useState([]);
+  const [cursorModelsLoading, setCursorModelsLoading] = useState(false);
+  const [cursorModelsError, setCursorModelsError] = useState('');
   const abortRef = useRef(null);
   const runningStageRef = useRef('');
   const [showLog, setShowLog] = useState(false);
   const [activeView, setActiveView] = useState('intents');
   const [runningStageKey, setRunningStageKey] = useState('');
+  const aiLogBodyRef = useRef(null);
+  const aiLogStickBottomRef = useRef(true);
+  const cursorModelRef = useRef(state.cursorModel);
+  cursorModelRef.current = state.cursorModel;
+
+  useLayoutEffect(() => {
+    const el = aiLogBodyRef.current;
+    if (!el || !showLog) return;
+    if (aiLogStickBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [state.aiLog, showLog]);
+
+  useEffect(() => {
+    if (state.aiEngine !== 'cursor') {
+      setCursorModelsLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setCursorModelsLoading(true);
+    setCursorModelsError('');
+
+    fetchCursorModels()
+      .then((data) => {
+        if (cancelled) return;
+        const models = Array.isArray(data.models) ? data.models : [];
+        setCursorModels(models);
+        const prev = cursorModelRef.current || '';
+        const nextId = prev && models.some((item) => item.id === prev)
+          ? prev
+          : (models[0]?.id || '');
+        if (nextId !== prev) {
+          dispatch({ type: 'SET_CURSOR_MODEL', model: nextId });
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCursorModels([]);
+        setCursorModelsError(error.message || '读取 Cursor 模型失败');
+        dispatch({ type: 'SET_CURSOR_MODEL', model: '' });
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCursorModelsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.aiEngine, dispatch]);
+
+  const handleRefreshCursorModels = useCallback(async () => {
+    if (state.aiEngine !== 'cursor') return;
+    setCursorModelsLoading(true);
+    setCursorModelsError('');
+    try {
+      const data = await fetchCursorModels();
+      const models = Array.isArray(data.models) ? data.models : [];
+      setCursorModels(models);
+      const prev = cursorModelRef.current || '';
+      const nextId = prev && models.some((item) => item.id === prev)
+        ? prev
+        : (models[0]?.id || '');
+      dispatch({ type: 'SET_CURSOR_MODEL', model: nextId });
+      showToast(models.length ? '✅ Cursor 模型列表已刷新' : '⚠️ 当前未读取到可用模型');
+    } catch (error) {
+      setCursorModels([]);
+      setCursorModelsError(error.message || '读取 Cursor 模型失败');
+      dispatch({ type: 'SET_CURSOR_MODEL', model: '' });
+      showToast(error.message || '❌ 读取 Cursor 模型失败');
+    } finally {
+      setCursorModelsLoading(false);
+    }
+  }, [dispatch, showToast, state.aiEngine]);
+
+  const cursorSplitReady = state.aiEngine !== 'cursor'
+    || (Boolean(state.cursorModel) && !cursorModelsLoading && !cursorModelsError);
+
+  const handleAiLogScroll = useCallback(() => {
+    const el = aiLogBodyRef.current;
+    if (!el) return;
+    const threshold = 80;
+    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    aiLogStickBottomRef.current = fromBottom <= threshold;
+  }, []);
 
   const appendAiLog = useCallback((text) => {
     dispatch({ type: 'AI_CHUNK', text });
@@ -153,6 +248,7 @@ export default function Step3TaskSplit() {
       abortRef.current = aiOrchestrateStage(
         {
           engine: state.aiEngine,
+          model: state.aiEngine === 'cursor' ? state.cursorModel : '',
           projectPath: state.projectPath,
           stage,
           step1: step1Json,
@@ -190,7 +286,7 @@ export default function Step3TaskSplit() {
         }
       );
     });
-  }, [appendAiLog, dispatch, state.aiEngine, state.projectFiles, state.projectPath]);
+  }, [appendAiLog, dispatch, state.aiEngine, state.cursorModel, state.projectFiles, state.projectPath]);
 
   const resetRunningState = useCallback(() => {
     abortRef.current = null;
@@ -228,9 +324,17 @@ export default function Step3TaskSplit() {
       dispatch({ type: 'SET_STEP', step: 1 });
       return;
     }
-    if (!state.aiEngine || !state.projectPath) {
-      showToast('⚠️ 请先在第一步配置 AI 引擎和项目路径');
+    if (!state.projectPath?.trim()) {
+      showToast('⚠️ 请先在第一步配置项目路径');
       dispatch({ type: 'SET_STEP', step: 1 });
+      return;
+    }
+    if (!state.aiEngine) {
+      showToast('⚠️ 请先选择执行引擎');
+      return;
+    }
+    if (state.aiEngine === 'cursor' && !state.cursorModel) {
+      showToast(cursorModelsError ? '⚠️ 请先处理 Cursor 模型列表加载失败' : '⚠️ 请选择 Cursor 模型');
       return;
     }
     if (config.dependsOn && !String(state.splitDrafts[config.dependsOn] || '').trim()) {
@@ -297,6 +401,8 @@ export default function Step3TaskSplit() {
     saveStageSnapshot,
     showToast,
     state.aiEngine,
+    state.cursorModel,
+    cursorModelsError,
     state.projectPath,
     state.requirementDesc,
     state.splitDrafts,
@@ -333,6 +439,76 @@ export default function Step3TaskSplit() {
   return (
     <div className="step-content active fade-in">
       <div className="resource-section-title" style={{ marginBottom: 16 }}>🧩 智能拆分</div>
+
+      <div
+        style={{
+          display: 'flex',
+          gap: 12,
+          marginBottom: 16,
+          flexWrap: 'wrap',
+          alignItems: 'flex-end',
+        }}
+      >
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
+          <span style={{ fontSize: '0.9em', opacity: 0.85 }}>执行引擎</span>
+          <select
+            className="form-select"
+            value={state.aiEngine}
+            onChange={(e) => dispatch({ type: 'SET_ENGINE', engine: e.target.value })}
+          >
+            <option value="">请选择执行引擎</option>
+            {ENGINE_OPTIONS.map((engine) => (
+              <option key={engine.key} value={engine.key}>
+                {engine.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {state.aiEngine === 'cursor' && (
+          <>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 260, flex: '1 1 320px' }}>
+              <span style={{ fontSize: '0.9em', opacity: 0.85 }}>Cursor 模型</span>
+              <select
+                className="form-select"
+                value={state.cursorModel}
+                onChange={(e) => dispatch({ type: 'SET_CURSOR_MODEL', model: e.target.value })}
+                disabled={cursorModelsLoading || cursorModels.length === 0}
+              >
+                <option value="">
+                  {cursorModelsLoading ? '正在读取模型列表…' : (cursorModels.length ? '请选择模型' : '暂无可用模型')}
+                </option>
+                {cursorModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label || model.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleRefreshCursorModels}
+              disabled={cursorModelsLoading}
+            >
+              {cursorModelsLoading ? '刷新中…' : '🔄 刷新模型'}
+            </button>
+          </>
+        )}
+      </div>
+
+      {state.aiEngine === 'cursor' && (
+        <div className="form-hint" style={{ marginBottom: 16, color: cursorModelsError ? 'var(--danger, #c62828)' : undefined }}>
+          {cursorModelsError
+            ? cursorModelsError
+            : cursorModelsLoading
+              ? '正在通过 Cursor CLI 读取当前账号可用模型列表…'
+              : state.cursorModel
+                ? `当前拆分使用模型：${state.cursorModel}`
+                : '请选择一个 Cursor 模型后再开始生成。'}
+        </div>
+      )}
+
       <div className="split-launch-card">
         <div className="split-launch-title">分阶段生成</div>
         <div className="split-launch-desc">
@@ -367,7 +543,7 @@ export default function Step3TaskSplit() {
                     <button
                       className="btn btn-primary"
                       onClick={() => runSingleStage(config)}
-                      disabled={!state.aiEngine || !state.projectPath || !dependencyReady || isOtherStageRunning}
+                      disabled={!state.aiEngine || !state.projectPath || !cursorSplitReady || !dependencyReady || isOtherStageRunning}
                     >
                       {hasOutput ? '↻ 重新生成' : '▶ 开始生成'}
                     </button>
@@ -395,7 +571,13 @@ export default function Step3TaskSplit() {
             <span className="ai-log-toggle">{showLog ? '▼' : '▶'}</span>
           </div>
           {showLog && (
-            <pre className="ai-log-body">{state.aiLog || '等待输出...'}</pre>
+            <pre
+              ref={aiLogBodyRef}
+              className="ai-log-body"
+              onScroll={handleAiLogScroll}
+            >
+              {state.aiLog || '等待输出...'}
+            </pre>
           )}
         </div>
       )}

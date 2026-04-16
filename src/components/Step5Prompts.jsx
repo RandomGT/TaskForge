@@ -468,7 +468,7 @@ export default function Step5Prompts() {
     setSelectedEngine(persistedPromptState.selectedEngine || state.aiEngine || '');
     setCursorModels(Array.isArray(persistedPromptState.cursorModels) ? persistedPromptState.cursorModels : []);
     setCursorModelsError(persistedPromptState.cursorModelsError || '');
-    setSelectedCursorModel(persistedPromptState.selectedCursorModel || '');
+    setSelectedCursorModel(persistedPromptState.selectedCursorModel || state.cursorModel || '');
     setSkillsCatalogMeta(persistedPromptState.skillsCatalogMeta || {
       loaded: false,
       total: 0,
@@ -510,8 +510,9 @@ export default function Step5Prompts() {
         const models = Array.isArray(data.models) ? data.models : [];
         setCursorModels(models);
         setSelectedCursorModel((prev) => {
-          if (prev && models.some((item) => item.id === prev)) return prev;
-          return models[0]?.id || '';
+          const next = prev && models.some((item) => item.id === prev) ? prev : (models[0]?.id || '');
+          dispatch({ type: 'SET_CURSOR_MODEL', model: next });
+          return next;
         });
       })
       .catch((error) => {
@@ -519,6 +520,7 @@ export default function Step5Prompts() {
         setCursorModels([]);
         setCursorModelsError(error.message || '读取 Cursor 模型失败');
         setSelectedCursorModel('');
+        dispatch({ type: 'SET_CURSOR_MODEL', model: '' });
       })
       .finally(() => {
         if (!cancelled) {
@@ -529,7 +531,7 @@ export default function Step5Prompts() {
     return () => {
       cancelled = true;
     };
-  }, [selectedEngine]);
+  }, [selectedEngine, dispatch]);
 
   useEffect(() => {
     const projectPath = state.projectPath?.trim();
@@ -1009,20 +1011,24 @@ ${skillsBlock}
       const data = await fetchCursorModels();
       const models = Array.isArray(data.models) ? data.models : [];
       setCursorModels(models);
-      setSelectedCursorModel((prev) => {
+      const nextId = (() => {
+        const prev = selectedCursorModel;
         if (prev && models.some((item) => item.id === prev)) return prev;
         return models[0]?.id || '';
-      });
+      })();
+      setSelectedCursorModel(nextId);
+      dispatch({ type: 'SET_CURSOR_MODEL', model: nextId });
       showToast(models.length ? '✅ Cursor 模型列表已刷新' : '⚠️ 当前未读取到可用模型');
     } catch (error) {
       setCursorModels([]);
       setCursorModelsError(error.message || '读取 Cursor 模型失败');
       setSelectedCursorModel('');
+      dispatch({ type: 'SET_CURSOR_MODEL', model: '' });
       showToast(error.message || '❌ 读取 Cursor 模型失败');
     } finally {
       setCursorModelsLoading(false);
     }
-  }, [selectedEngine, showToast]);
+  }, [dispatch, selectedCursorModel, selectedEngine, showToast]);
 
   const runSingleSkillPackageInstall = useCallback((projectPath, pkg) => (
     new Promise((resolve, reject) => {
@@ -1885,7 +1891,11 @@ ${skillsBlock}
                 <select
                   className="form-select"
                   value={selectedCursorModel}
-                  onChange={(e) => setSelectedCursorModel(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSelectedCursorModel(v);
+                    dispatch({ type: 'SET_CURSOR_MODEL', model: v });
+                  }}
                   disabled={cursorModelsLoading || cursorModels.length === 0}
                 >
                   <option value="">

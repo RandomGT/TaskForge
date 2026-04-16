@@ -7,6 +7,8 @@ const AppContext = createContext();
 const initialState = {
   // AI engine config
   aiEngine: '', // 'claude' | 'cursor'
+  /** Cursor CLI 模型 id；仅 engine 为 cursor 时使用 */
+  cursorModel: '',
   projectPath: '',
   availableEngines: [],
   serverOnline: false,
@@ -67,6 +69,8 @@ function reducer(state, action) {
     // AI engine
     case 'SET_ENGINE':
       return { ...state, aiEngine: action.engine };
+    case 'SET_CURSOR_MODEL':
+      return { ...state, cursorModel: action.model || '' };
     case 'SET_PROJECT_PATH':
       return { ...state, projectPath: action.path };
     case 'SET_AVAILABLE_ENGINES':
@@ -460,9 +464,13 @@ function reducer(state, action) {
         if (maxId > taskIdCounter) taskIdCounter = maxId;
       }
       const figmaPages = normalizeFigmaPagesFromLegacy(loaded);
+      const migratedCursorModel = Object.prototype.hasOwnProperty.call(loaded, 'cursorModel')
+        ? (loaded.cursorModel || '')
+        : (loaded.optimizations?.promptExecution?.selectedCursorModel || '');
       return {
         ...state,
         ...loaded,
+        cursorModel: migratedCursorModel,
         splitStrategy: loaded.splitStrategy === 'page' ? 'feature' : (loaded.splitStrategy || state.splitStrategy),
         figmaPages,
         figmaResources: [],

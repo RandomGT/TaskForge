@@ -2230,7 +2230,7 @@ app.post('/api/orchestrate-split', (req, res) => {
 });
 
 app.post('/api/orchestrate-stage', (req, res) => {
-  const { engine, projectPath, stage, step1, step2, previousOutputs, projectFiles } = req.body;
+  const { engine, projectPath, stage, step1, step2, previousOutputs, projectFiles, model } = req.body;
 
   if (!engine || !projectPath || !stage || !step1) {
     return res.status(400).json({ error: 'Missing required fields: engine, projectPath, stage, step1' });
@@ -2254,7 +2254,7 @@ app.post('/api/orchestrate-stage', (req, res) => {
   sendSSE('chunk', { text: `[server] 已收到阶段 ${stage} 请求，正在启动 ${engine} CLI...\n` });
   console.log(`[orchestrate-stage] request=${requestId} start stage=${stage} engine=${engine} cwd=${projectPath}`);
 
-  const cli = buildCliArgs(engine, prompt);
+  const cli = buildCliArgs(engine, prompt, engine === 'cursor' && model ? { model } : {});
   if (!cli) {
     sendSSE('error', { message: `不支持的引擎: ${engine}` });
     res.end();
@@ -2280,6 +2280,10 @@ app.post('/api/orchestrate-stage', (req, res) => {
       ? '[server] Cursor 已启用 stream-json 流式输出\n'
       : '[server] 当前引擎使用文本流式输出\n',
   });
+
+  if (engine === 'cursor' && model) {
+    sendSSE('chunk', { text: `[server] Cursor 模型: ${model}\n` });
+  }
 
   const proc = runCLI(
     cli.command,
